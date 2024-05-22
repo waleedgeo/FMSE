@@ -69,7 +69,7 @@ def calculate_zscore(s1_pre, s1_post, aoi):
         zscore_asc = calc_zscore(s1_pre, s1_post, 'ASCENDING')
         return ee.ImageCollection.fromImages([zscore_des, zscore_asc]).mean().clip(aoi)
 
-def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd):
+def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd, under_estimate):
     
     """
     Generate flood mask based on Z-score and various thresholds.
@@ -99,6 +99,8 @@ def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd):
     if slp_thd is None:
         slp_thd = 10
     
+    if under_estimate is None:
+        under_estimate = False
     
     # JRC water mask
     jrc = ee.ImageCollection("JRC/GSW1_4/MonthlyHistory").filterDate('2016-01-01', '2022-01-01')
@@ -119,14 +121,18 @@ def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd):
 
     # Combine flood classes into a single layer
     
-    # highest probability combining all vv vh vv+vh flooded classes
-    #flood_layer = flood_class.where(flood_class.eq(1), 1).where(flood_class.eq(2), 1).where(flood_class.eq(3), 1).where(flood_class.eq(4), 2)
-    #flood_layer = flood_layer.where(jrcmask.eq(0), 2).where(flood_class.eq(0), 2).selfMask().rename('label')
-    
-    # lowest probability only vv+vh 
-    flood_layer = flood_class.where(flood_class.eq(3), 1).where(flood_class.neq(3), 2)
-    flood_layer = flood_layer.selfMask().rename('label')
 
+    if under_estimate==True:
+        # lowest probability vv+vh 
+        flood_layer = flood_class.where(flood_class.eq(3), 1).where(flood_class.neq(3), 2)
+        flood_layer = flood_layer.selfMask().rename('label')
+    else:
+        # highest probability combining all vv vh vv+vh flooded classes
+        flood_layer = flood_class.where(flood_class.eq(1), 1).where(flood_class.eq(2), 1).where(flood_class.eq(3), 1).where(flood_class.eq(4), 2)
+        flood_layer = flood_layer.where(jrcmask.eq(0), 2).where(flood_class.eq(0), 2).selfMask().rename('label')
+    
+
+    
     return flood_class.clip(aoi), flood_layer.clip(aoi)
 
 
@@ -274,7 +280,7 @@ def train_classifier(training, bandNames):
         inputProperties=bandNames
     )
 
-def classify_image(image, classifier, bandNames, probability=False):
+def classify_image(image, classifier, bandNames):
     """
     Classify the image using the trained classifier.
 
@@ -288,11 +294,9 @@ def classify_image(image, classifier, bandNames, probability=False):
     OR
     ee.Image: Classified image with probability values.
     """
-    if probability==False:
-        classified_image = image.select(bandNames).classify(classifier)
-        classified_image = classified_image.gt(0).selfMask().rename('classified')
-    elif probability==True:
-        classified_image = image.select(bandNames).classify(classifier.setOutputMode('PROBABILITY')).rename('probability')
+    classified_image = image.select(bandNames).classify(classifier)
+    classified_image = classified_image.gt(0).selfMask().rename('flooded')
+    
     return classified_image
 
 def calculate_accuracy_metrics(training, validation, classifier):
@@ -343,7 +347,7 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split):
     classifier = train_classifier(training, image.bandNames().getInfo())
 
     # Classify the image
-    model_output = classify_image(image, classifier, image.bandNames().getInfo(), probability=False)
+    model_output = classify_image(image, classifier, image.bandNames().getInfo())
     print('Done with classification...')
     # Calculate and print accuracy metrics
     calculate_accuracy_metrics(training, validation, classifier)
