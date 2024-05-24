@@ -110,8 +110,8 @@ def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd, under_estim
     ow = jrcwat.gte(ee.Image(pow_thd))
 
     # Elevation and slope masking using FABDEM
-    elevation = ee.ImageCollection("projects/sat-io/open-datasets/FABDEM").mosaic().setDefaultProjection('EPSG:3857', None, 30)
-    slope = ee.Terrain.slope(elevation)
+    elevation = ee.ImageCollection("projects/sat-io/open-datasets/FABDEM").mosaic().setDefaultProjection('EPSG:3857', None, 30).clip(aoi)
+    slope = ee.Terrain.slope(elevation).clip(aoi)
 
     # Classify floods
     vvflag = z.select('VV').lte(ee.Image(zvv_thd))
@@ -138,6 +138,31 @@ def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd, under_estim
 
 # masking flood done
 
+# Generate distance rasters
+def distance_to_feature(feature_collection, crs, scale, aoi):
+    
+    '''	
+    Generate distance rasters for the given feature collection.
+    feature_collection (ee.FeatureCollection): The feature collection for which distance rasters are to be generated.
+    crs (str): The CRS to reproject the distance raster.
+    scale (int): The scale for reprojection.
+    aoi (ee.Geometry): Area of Interest for clipping the distance raster.
+    Returns:
+    ee.Image: Distance raster for the feature collection.
+    
+    '''
+    # Convert the FeatureCollection to a FeatureCollection
+    feature_collection = ee.FeatureCollection(feature_collection).filterBounds(aoi)
+
+    # Use the distance function to generate a distance raster
+    distance_raster = feature_collection.distance()
+
+    distance_raster = distance_raster.reproject(crs=crs, scale=scale)
+
+    # Clip the raster to the AOI
+    distance_raster = distance_raster.clip(aoi)
+
+    return distance_raster
 
 
 def prepare_datasets(aoi, projection='EPSG:4326', scale=30):
@@ -150,7 +175,7 @@ def prepare_datasets(aoi, projection='EPSG:4326', scale=30):
     scale (int): Scale for reprojection. Default is 30.
 
     Returns:
-    tuple: DEM, slope, and aspect images reprojected to the specified projection.
+    tuple: DEM, slope, aspect, and dtriver images reprojected to the specified projection.
     """
     dem_proj = ee.ImageCollection("projects/sat-io/open-datasets/FABDEM")\
         .filterBounds(aoi)\
@@ -164,8 +189,25 @@ def prepare_datasets(aoi, projection='EPSG:4326', scale=30):
     dem = dem_proj.reproject(crs=projection, scale=scale)
     slope = slope_proj.reproject(crs=projection, scale=scale)
     aspect = aspect_proj.reproject(crs=projection, scale=scale)
+    
+    shoreline = ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/mainlands')\
+        .merge(ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/big_islands'))\
+        .filterBounds(aoi)
+    
+    rivers = ee.FeatureCollection("projects/sat-io/open-datasets/HydroAtlas/RiverAtlas_v10")\
+        .filterBounds(aoi)
 
-    return dem, slope, aspect
+    # Combine rivers and shoreline into a single FeatureCollection
+    rivers_and_shoreline = rivers.merge(shoreline)
+
+    # Generate distance rasters for roads, and rivers+shoreline
+    dtriver = distance_to_feature(rivers_and_shoreline, projection, scale, aoi)
+    #rivers_and_shoreline_distance = distance_to_feature(rivers_and_shoreline, 30)
+
+    return dem, slope, aspect, dtriver
+
+
+
 
 def label_non_flooded(flood_binary_layer, aoi):
     """
@@ -222,7 +264,7 @@ def create_sample_feature_collection(flood_layer, flood_unmask, aoi, num_samples
     label = sample.map(update_feature)
     return label
 
-def prepare_s1_image(image, additional_bands, aoi):
+def prepare_s1_image(s1_post, additional_bands, aoi):
     """
     Prepare the image for classification by adding additional bands.
 
@@ -234,7 +276,7 @@ def prepare_s1_image(image, additional_bands, aoi):
     Returns:
     ee.Image: Prepared image with added bands.
     """
-    image = image.mean().clip(aoi).toFloat()
+    image = s1_post.mean().clip(aoi).toFloat()
     for band in additional_bands:
         image = image.addBands(band)
     return image
@@ -331,23 +373,24 @@ def calculate_accuracy_metrics(training, validation, classifier):
 
 def flood_mapping(aoi, s1_post, flood_layer, num_samples, split):
     # Prepare datasets
-    dem, slope, aspect = prepare_datasets(aoi)
+    dem, slope, aspect, dtriver = prepare_datasets(aoi)
     print('Done with preparing datasets...')
     # Create sample feature collection
     label_fc = create_sample_feature_collection(flood_layer,False, aoi, num_samples)
     print('Done with creating sample feature collection...')
     # Prepare image for classification
-    additional_bands = [dem, slope, aspect]
+    additional_bands = [dem, slope, aspect, dtriver]
     image = prepare_s1_image(s1_post, additional_bands, aoi)
 
     # Create training and validation samples
     training, validation = create_training_and_validation_samples(image, label_fc, split)
     print('Done with creating training and validation samples...')
     # Train the classifier
-    classifier = train_classifier(training, image.bandNames().getInfo())
+    bandNames = image.bandNames().getInfo()
+    classifier = train_classifier(training, bandNames)
 
     # Classify the image
-    model_output = classify_image(image, classifier, image.bandNames().getInfo())
+    model_output = classify_image(image, classifier, bandNames)
     print('Done with classification...')
     # Calculate and print accuracy metrics
     calculate_accuracy_metrics(training, validation, classifier)
@@ -398,7 +441,7 @@ def prepare_landsat_images(aoi, endDate):
     landsat_combined = l8.merge(l9)
 
     landsat_filtered = landsat_combined.filter(ee.Filter.calendarRange(year, year, 'year'))\
-                                       .filter(ee.Filter.lt('CLOUD_COVER', 10))\
+                                       .filter(ee.Filter.lt('CLOUD_COVER', 20))\
                                        .map(apply_scale_factors)\
                                        .median()\
                                        .clip(aoi)
@@ -429,7 +472,7 @@ def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
     ndvi = landsat_filtered.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI')
     ndwi = landsat_filtered.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI')
     ndbi = landsat_filtered.normalizedDifference(['SR_B6', 'SR_B5']).rename('NDBI')
-    ndsi = landsat_filtered.normalizedDifference(['SR_B2', 'SR_B5']).rename('NDSI')
+    #ndsi = landsat_filtered.normalizedDifference(['SR_B2', 'SR_B5']).rename('NDSI')
 
     #rainfall = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')\
     #            .filterDate('2018-01-01', '2023-01-01')\
@@ -441,7 +484,7 @@ def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
     print('Done with preparing datasets for susceptibility analysis...')
     
     image_sus = landsat_filtered.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'])\
-                                .addBands([ndvi, ndwi, ndbi, ndsi, dem])\
+                                .addBands([ndvi, ndwi, ndbi, dem])\
                                 .clip(aoi)\
                                 .setDefaultProjection('EPSG:4326')
     
