@@ -1,6 +1,31 @@
 # Part-1: Flood Mapping
 
 import ee
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+import time
+
+
+
+
+def boundary(feature):
+    '''
+    This function takes a feature and returns the boundary of the feature
+    
+    Args:
+    feature: ee.Feature
+    returns:
+    boundary: ee.Feature
+    
+    '''
+    
+    bbox = feature.geometry().bounds()
+    boundary = ee.Geometry.Polygon(bbox.coordinates().get(0))
+    
+    return boundary
+    
+
 
 def get_s1_col(date, days, aoi):
     """
@@ -379,7 +404,7 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split):
     label_fc = create_sample_feature_collection(flood_layer,False, aoi, num_samples)
     print('Done with creating sample feature collection...')
     # Prepare image for classification
-    additional_bands = [dem, slope, aspect, dtriver]
+    additional_bands = [dem]#, slope, aspect, dtriver]
     image = prepare_s1_image(s1_post, additional_bands, aoi)
 
     # Create training and validation samples
@@ -418,6 +443,7 @@ def apply_scale_factors(image):
     return image.addBands(optical_bands, None, True).addBands(thermal_bands, None, True)
 
 def prepare_landsat_images(aoi, endDate):
+    
     """
     Prepare Landsat 8 and 9 images, combine them, and apply scaling factors.
 
@@ -448,7 +474,9 @@ def prepare_landsat_images(aoi, endDate):
     
     return landsat_filtered
 
+
 def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
+    
     """
     Prepare the necessary datasets for susceptibility analysis.
 
@@ -459,6 +487,7 @@ def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
     Returns:
     ee.Image: Combined image with all the necessary bands for susceptibility analysis.
     """
+    
     dem_proj = ee.ImageCollection("projects/sat-io/open-datasets/FABDEM")\
             .filterBounds(aoi)\
             .mosaic()\
@@ -517,7 +546,7 @@ def train_susceptibility_model(image_sus, label, split):
     training_sus = sample_all_sus.filter(ee.Filter.lt('random', split))
     validation_sus = sample_all_sus.filter(ee.Filter.gte('random', split))
     print('Training sus first: ',training_sus.first().getInfo())
-    classifier_sus = ee.Classifier.smileRandomForest(115).train(
+    classifier_sus = ee.Classifier.smileRandomForest(60).train(
         features=training_sus,
         classProperty='label',
         inputProperties=bands_sus
@@ -563,5 +592,410 @@ def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split):
     return flood_prob
 
 
+def quantile_based_categorization(susceptibility_layer, aoi):
+    """
+    Convert a continuous flood susceptibility layer into five categorical classes based on quantiles.
+
+    Parameters:
+    susceptibility_layer (ee.Image): Continuous flood susceptibility layer with values between 0 and 1.
+    aoi (ee.Geometry): Area of Interest for calculating quantiles.
+
+    Returns:
+    ee.Image: Categorical flood susceptibility layer with values from 1 to 5.
+    """
+    # Calculate quantiles for the susceptibility layer
+    quantiles = susceptibility_layer.reduceRegion(
+        reducer=ee.Reducer.percentile([20, 40, 60, 80], ['p20', 'p40', 'p60', 'p80']),
+        geometry=aoi,
+        scale=30,
+        maxPixels=1e9
+    )
+    #print('Quantiles:', quantiles.getInfo())
+    # Extract quantile values
+    q20 = quantiles.get('classification_p20')
+    q40 = quantiles.get('classification_p40')
+    q60 = quantiles.get('classification_p60')
+    q80 = quantiles.get('classification_p80')
+
+    # Apply quantile thresholds to create categorical classes
+    very_low = susceptibility_layer.lte(ee.Number(q20)).multiply(1)
+    low = susceptibility_layer.gt(ee.Number(q20)).And(susceptibility_layer.lte(ee.Number(q40))).multiply(2)
+    moderate = susceptibility_layer.gt(ee.Number(q40)).And(susceptibility_layer.lte(ee.Number(q60))).multiply(3)
+    high = susceptibility_layer.gt(ee.Number(q60)).And(susceptibility_layer.lte(ee.Number(q80))).multiply(4)
+    very_high = susceptibility_layer.gt(ee.Number(q80)).multiply(5)
+
+    # Combine all classes into a single layer
+    categorical_layer = very_low.add(low).add(moderate).add(high).add(very_high).rename('susceptibility')
+
+    return categorical_layer
+
+
+
+# Exposure Analysis
+
+def calculate_flood_exposure(flood_binary, aoi, export=False):
+    """
+    Calculate the population exposed to the flood based on the flood layer.
+
+    Parameters:
+    flood_layer (ee.Image): Flood layer with values 1 for flooded and 2 for non-flooded.
+    population_dataset (str): Path to the population dataset.
+    aoi (ee.Geometry): Area of Interest.
+
+    Returns:
+    ee.Number: Total population exposed to the flood.
+    ee.Number: Total population in the study area.
+    """
+    # Load population dataset
+    population = ee.ImageCollection('WorldPop/GP/100m/pop')\
+                    .filter(ee.Filter.eq('year', 2020))\
+                    .mosaic()\
+                    .clip(aoi)
+    
+    # Mask non-flooded areas
+    flood_exposure = population.updateMask(flood_binary.eq(1))
+    
+    # Calculate total exposed population
+    total_exposed_population = flood_exposure.reduceRegion(
+        reducer=ee.Reducer.sum(),
+        geometry=aoi,
+        scale=1000,
+        maxPixels=1e12
+    ).get('population')
+    
+     # Calculate total population in the study area
+    total_population = population.reduceRegion(
+        reducer=ee.Reducer.sum(),
+        geometry=aoi,
+        scale=1000,
+        maxPixels=1e12
+    ).get('population')
+    
+    
+    exposed_population = total_exposed_population.getInfo()
+    total_pop = total_population.getInfo()
+    non_exposed_population = total_pop - exposed_population
+    
+    labels = ['Exposed Population', 'Non-exposed Population']
+    sizes = [exposed_population, non_exposed_population]
+    colors = ['#fc4d4c', '#d8d8d8']  # Tomato color for exposed population, light green for non-exposed population
+    
+    plt.figure(figsize=(6, 6))
+    plt.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140)
+    plt.axis('equal')
+    plt.title('Population Exposed to Flood Hazard')
+    if export==True:
+        plt.savefig(f'{city}_exposed_population_flood_hazard.png', dpi=300, bbox_inches='tight', pad_inches=0.1, transparent=True)
+    plt.show()
+    
+    
+    return total_exposed_population, total_population
+
+
+
+def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=False):
+    """
+    Calculate exposure for population, nighttime light, and land cover for each susceptibility level or flood map.
+
+    Parameters:
+    susceptibility_layer (ee.Image): Flood susceptibility layer or flood map.
+    population_dataset (str): Path to the population dataset.
+    nightlight_dataset (str): Path to the nighttime light dataset.
+    landcover_dataset (str): Path to the land cover dataset.
+    aoi (ee.Geometry): Area of Interest.
+    flood_map (bool): Flag to indicate if susceptibility categories or flood map should be used.
+
+    Returns:
+    pd.DataFrame: Dataframe with exposure information.
+    """
+        # Define remap function for landcover
+    def remapper(image):
+        return image.remap([1, 2, 4, 5, 7, 8, 9, 10, 11], [1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+    # Load datasets
+    population = ee.ImageCollection('WorldPop/GP/100m/pop')\
+                    .filter(ee.Filter.eq('year', 2020))\
+                    .mosaic()\
+                    .clip(aoi).rename('b1')
+    nightlight = ee.Image('projects/sat-io/open-datasets/npp-viirs-ntl/LongNTL_2022').clip(aoi).rename('b1')
+    landcover = ee.ImageCollection('projects/sat-io/open-datasets/landcover/ESRI_Global-LULC_10m_TS')\
+                    .filterDate('2022-01-01', '2022-12-31')\
+                    .map(remapper)\
+                    .mosaic().clip(aoi).rename('b1')
+    
+
+    # Initialize results dictionary with descriptive land cover names
+    results = {
+        'Susceptibility Level': [],
+        'Exposed Population': [],
+        'Exposed Nighttime Light': [],
+        'lulc_water': [],
+        'lulc_trees': [],
+        'lulc_flooded_vegetation': [],
+        'lulc_crops': [],
+        'lulc_built_area': [],
+        'lulc_bare_ground': [],
+        'lulc_snow_ice': [],
+        'lulc_clouds': [],
+        'lulc_rangeland': [],
+        'Category': []
+    }
+    
+    if flood_map:
+        susceptibility_levels = [1]
+        susceptibility_layer = susceptibility_layer.gt(0).selfMask()
+        category_names = ['Flooded']
+    else:
+        # Define quantile-based categories
+        susceptibility_levels = range(1, 6)
+        category_names = ['Very Low', 'Low', 'Moderate', 'High', 'Very High']
+    
+    # Calculate exposure for each susceptibility level
+    for level, category in zip(susceptibility_levels, category_names):
+        # Mask areas that do not match the current susceptibility level
+        level_mask = susceptibility_layer.eq(level)
+        level_population = population.updateMask(level_mask)
+        level_nightlight = nightlight.updateMask(level_mask)
+        level_landcover = landcover.updateMask(level_mask)
+
+        # Calculate total exposed population
+        exposed_population = level_population.reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=aoi,
+            scale=1000,
+            maxPixels=1e12
+        ).get('b1').getInfo()
+
+        # Calculate total exposed nighttime light
+        exposed_nightlight = level_nightlight.reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=aoi,
+            scale=1000,
+            maxPixels=1e12
+        ).get('b1').getInfo()
+
+        # Calculate land cover area for each class
+        landcover_areas = level_landcover.reduceRegion(
+            reducer=ee.Reducer.frequencyHistogram(),
+            geometry=aoi,
+            scale=1000,
+            maxPixels=1e12
+        ).get('b1').getInfo()
+
+        # Append results to the dictionary
+        results['Susceptibility Level'].append(level)
+        results['Category'].append(category)
+        results['Exposed Population'].append(exposed_population)
+        results['Exposed Nighttime Light'].append(exposed_nightlight)
+        landcover_classes = {
+            'lulc_water': 1,
+            'lulc_trees': 2,
+            'lulc_flooded_vegetation': 3,
+            'lulc_crops': 4,
+            'lulc_built_area': 5,
+            'lulc_bare_ground': 6,
+            'lulc_snow_ice': 7,
+            'lulc_clouds': 8,
+            'lulc_rangeland': 9
+        }
+        for lulc_name, lulc_code in landcover_classes.items():
+            results[lulc_name].append(landcover_areas.get(str(lulc_code), 0))
+        
+    # Convert results to dataframe
+    df = pd.DataFrame(results.round(2))
+    
+    if export==True:
+        df.to_csv(f'{city}_exposure_df.csv', index=False)
+    
+    return df
+
+
+
+
+def visualize_exposure(df, export=False):
+    """
+    Generate visualizations for exposure analysis:
+    1. A donut chart for population exposure to susceptibility per class.
+    2. A donut chart for economic activity (nighttime light) exposure per susceptibility class.
+    3. Five combined subplot charts for land cover area exposure for each flood susceptibility class.
+
+    Parameters:
+    df (pd.DataFrame): Dataframe containing exposure information.
+    """
+    # Colors for each susceptibility class
+    colors = ['#2c7bb6', '#abd9e9', '#ffffbf', '#fdae61', '#d7191c']
+    labels = df['Category'].tolist()
+    
+    # Apply the ggplot theme
+    sns.set_theme(style="whitegrid")
+    sns.set_context("talk")
+
+    
+    # Function to create donut charts
+    def create_donut_chart(data, title, labels, name, export):
+        fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(aspect="equal"))
+        wedges, texts, autotexts = ax.pie(data, labels=None, autopct='', startangle=140,
+                                          colors=colors, pctdistance=0.85,
+                                          wedgeprops={'edgecolor': 'black'})
+        
+        for i, a in enumerate(autotexts):
+            percentage = f"{data[i]/sum(data)*100:.1f}%"
+            label = labels[i]
+            autotexts[i].set_text(f"{percentage}\n{label}")
+            autotexts[i].set_fontsize(12)
+
+        centre_circle = plt.Circle((0,0),0.70,fc='white')
+        fig.gca().add_artist(centre_circle)
+        plt.title(title, fontsize=16, fontweight='bold')
+        plt.axis('equal')
+        plt.tight_layout()
+            
+        if export==True:
+            plt.savefig(f'{city}_{name}_exposure_sus.png', dpi=300, bbox_inches='tight', pad_inches=0.1, transparent=True)
+    
+        plt.show()
+
+    # Donut chart for population exposure
+    create_donut_chart(df['Exposed Population'], 'Population Exposure to Flood Susceptibility', labels, 'pop', export)
+
+    # Donut chart for economic activity (nighttime light) exposure
+    create_donut_chart(df['Exposed Nighttime Light'], 'Economic Activity Exposure to Flood Susceptibility', labels, 'ntl', export)
+
+    # Land cover columns
+    landcover_columns = [
+        'lulc_water', 'lulc_trees', 'lulc_flooded_vegetation', 'lulc_crops',
+        'lulc_built_area', 'lulc_bare_ground', 'lulc_snow_ice', 'lulc_clouds', 'lulc_rangeland'
+    ]
+
+    # Create subplots for land cover area exposure
+    fig, axes = plt.subplots(3, 2, figsize=(15, 20))
+    axes = axes.flatten()
+
+    for i, (category, row) in enumerate(df.iterrows()):
+        landcover_data = row[landcover_columns] / 1e6  # Convert from m^2 to km^2
+        landcover_data_sorted = landcover_data.sort_values(ascending=False)
+        ax = axes[i]
+        sns.barplot(x=landcover_data_sorted.index, y=landcover_data_sorted.values, palette="YlOrRd_r", ax=ax)
+
+        # Adjust the positioning of the text labels on the bars
+        for bar in ax.patches:
+            yval = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2, yval + 0.02 * landcover_data_sorted.max(), f'{yval:.2f}', ha='center', va='bottom', fontsize=10)
+
+        ax.set_title(f'Land Cover Area Exposed to {row["Category"]} Susceptibility', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Area (sq km)', fontsize=14)
+        ax.set_xlabel('Land Cover Type', fontsize=14)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', fontsize=12)
+        ax.set_ylim(0, landcover_data_sorted.max() * 1.1)
+        ax.set_facecolor('white')
+
+    # Remove the unused subplot
+    fig.delaxes(axes[-1])
+
+    plt.tight_layout()
+    
+    if export==True:
+        plt.savefig(f'{city}_lulc_exposure_sus.png', dpi=300, bbox_inches='tight', pad_inches=0.1, transparent=True)
+    
+    plt.show()
+
+
+
+# export
+
+
+def export_layers(aoi, flood_binary, flood_class, flood_mapped, susceptibility_layer, susceptibility_category_layer,
+                  export_flood_binary=True, export_flood_class=True, export_flood_mapped=True,
+                  export_susceptibility_layer=True, export_susceptibility_category_layer=True):
+    """
+    Export specified layers to Google Drive.
+
+    Parameters:
+    aoi (ee.Geometry): Area of Interest.
+    flood_binary (ee.Image): Flood binary layer.
+    flood_class (ee.Image): Flood class layer.
+    flood_mapped (ee.Image): Flood mapped layer.
+    susceptibility_layer (ee.Image): Susceptibility layer.
+    susceptibility_category_layer (ee.Image): Susceptibility category layer.
+    export_flood_binary (bool): Flag to export flood binary layer.
+    export_flood_class (bool): Flag to export flood class layer.
+    export_flood_mapped (bool): Flag to export flood mapped layer.
+    export_susceptibility_layer (bool): Flag to export susceptibility layer.
+    export_susceptibility_category_layer (bool): Flag to export susceptibility category layer.
+    """
+
+    tasks = []
+    aoi = aoi.geometry()
+    if export_flood_binary:
+        flood_binary_task = ee.batch.Export.image.toDrive(
+            image=flood_binary,
+            description=f'{city}_flood_mask_layer',
+            folder='FMSE',
+            scale=10,
+            region=aoi,
+            maxPixels=1e13
+        )
+        flood_binary_task.start()
+        tasks.append(flood_binary_task)
+
+    if export_flood_class:
+        flood_class_task = ee.batch.Export.image.toDrive(
+            image=flood_class,
+            description=f'{city}_flood_class_layer',
+            folder='FMSE',
+            scale=10,
+            region=aoi,
+            maxPixels=1e13
+        )
+        flood_class_task.start()
+        tasks.append(flood_class_task)
+
+    if export_flood_mapped:
+        flood_mapped_task = ee.batch.Export.image.toDrive(
+            image=flood_mapped,
+            description=f'{city}_flood_mapped_layer',
+            folder='FMSE',
+            scale=10,
+            region=aoi,
+            maxPixels=1e13
+        )
+        flood_mapped_task.start()
+        tasks.append(flood_mapped_task)
+
+    if export_susceptibility_layer:
+        susceptibility_task = ee.batch.Export.image.toDrive(
+            image=susceptibility_layer,
+            description=f'{city}_flood_susceptibility_layer',
+            folder='FMSE',
+            scale=30,
+            region=aoi,
+            maxPixels=1e13
+        )
+        susceptibility_task.start()
+        tasks.append(susceptibility_task)
+
+    if export_susceptibility_category_layer:
+        susceptibility_category_task = ee.batch.Export.image.toDrive(
+            image=susceptibility_category_layer,
+            description=f'{city}_flood_susceptibility_category_layer',
+            folder='FMSE',
+            scale=30,
+            region=aoi,
+            maxPixels=1e13
+        )
+        susceptibility_category_task.start()
+        tasks.append(susceptibility_category_task)
+
+    def monitor_tasks(tasks):
+        while any([task.status()['state'] in ['READY', 'RUNNING'] for task in tasks]):
+            for task in tasks:
+                status = task.status()
+                description = status['description']
+                state = status['state']
+                print(f'Task {description} is {state}')
+            time.sleep(30)  # Check every 30 seconds
+
+    # Monitor the export tasks
+    monitor_tasks(tasks)
 
 
