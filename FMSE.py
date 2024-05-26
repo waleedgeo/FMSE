@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 import time
-
+import numpy as np
+import matplotlib.pyplot as plt
 
 
 
@@ -341,7 +342,7 @@ def train_classifier(training, bandNames):
     Returns:
     ee.Classifier: Trained RandomForest classifier.
     """
-    return ee.Classifier.smileRandomForest(115).train(
+    return ee.Classifier.smileRandomForest(100).train(
         features=training,
         classProperty='label',
         inputProperties=bandNames
@@ -366,37 +367,66 @@ def classify_image(image, classifier, bandNames):
     
     return classified_image
 
+
+
 def calculate_accuracy_metrics(training, validation, classifier):
     """
-    Calculate and print accuracy metrics for training and validation samples.
-
+    Calculate accuracy metrics and plot ROC curve for the flood mapping.
+    
     Parameters:
     training (ee.FeatureCollection): Training feature collection.
     validation (ee.FeatureCollection): Validation feature collection.
     classifier (ee.Classifier): Trained classifier.
+    
+    Returns:
+    dict: A dictionary containing accuracy metrics and ROC-AUC score.
     """
-    def print_am(error_matrix, dataset_name):
-        overall_accuracy = error_matrix.accuracy().getInfo()
-        kappa = error_matrix.kappa().getInfo()
-        producers_accuracy = error_matrix.producersAccuracy().getInfo()
-        consumers_accuracy = error_matrix.consumersAccuracy().getInfo()
-        f1_score = error_matrix.fscore().getInfo()[1]  # F1 score for the flood class (1)
+    # Classify the training and validation data
+    training_classified = training.classify(classifier)
+    validation_classified = validation.classify(classifier)
+    
+    # Compute the error matrix for training and validation
+    train_accuracy = training_classified.errorMatrix('label', 'classification')
+    validation_accuracy = validation_classified.errorMatrix('label', 'classification')
+    
+    # Extract true and predicted labels from validation data
+    accuracy = validation_accuracy.accuracy().getInfo()
 
-        print(f"{dataset_name} Accuracy Metrics:")
-        print(f"Overall Accuracy: {overall_accuracy}")
-        print(f"Kappa: {kappa}")
-        print(f"Producer's Accuracy: {producers_accuracy}")
-        print(f"User's Accuracy: {consumers_accuracy}")
-        print(f"F1 Score: {f1_score}")
+    # Calculate overall precision and recall
+    precision_list = validation_accuracy.consumersAccuracy().getInfo()
+    recall_list = validation_accuracy.producersAccuracy().getInfo()
+    precision = precision_list[0]
+    recall = recall_list[0] # 0 for flooded class
+    
+    
+    overall_precision = np.mean(precision_list)
+    overall_recall = np.mean(recall_list)
+ 
+    f1_overall = 2 * (overall_precision * overall_recall) / (overall_precision + overall_recall)
+    f1 = validation_accuracy.fscore().getInfo()[0]
+    # Calculate additional metrics using sklearn
 
-    train_accuracy = training.classify(classifier).errorMatrix('label', 'classification')
-    validation_accuracy = validation.classify(classifier).errorMatrix('label', 'classification')
 
-    print_am(train_accuracy, "Training")
-    print_am(validation_accuracy, "Validation")
+    # create pd.DataFrame for results
+    
+    accuracy_dict = {
+        'accuracy': accuracy,
+        'precision': precision[0],
+        'recall': recall[0],
+        'f1_score': f1,
+        'precision_mean': overall_precision,
+        'recall_mean': overall_recall,
+        'f1_mean': f1_overall
+    }
+    
+
+    #covert accuracy_dict to pd.DataFrame
+    results = pd.DataFrame.from_dict(accuracy_dict, orient='index')
+
+    return results
 
 
-def flood_mapping(aoi, s1_post, flood_layer, num_samples, split):
+def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city):
     # Prepare datasets
     dem, slope, aspect, dtriver = prepare_datasets(aoi)
     print('Done with preparing datasets...')
@@ -418,8 +448,11 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split):
     model_output = classify_image(image, classifier, bandNames)
     print('Done with classification...')
     # Calculate and print accuracy metrics
-    calculate_accuracy_metrics(training, validation, classifier)
-    print('Done with accuracy metrics...')
+    results = calculate_accuracy_metrics(training, validation, classifier)
+    results = results.round(2)
+    results.to_csv(f'{city}_flood_mapping_accuracy.csv', index=True)
+    print('Flood Mapping Accuracy Results: ',results)
+    print('Done ...')
     return model_output
 
 
@@ -520,7 +553,7 @@ def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
     return image_sus
 
 
-def train_susceptibility_model(image_sus, label, split):
+def train_susceptibility_model(image_sus, label, split, city):
     """
     Train a susceptibility model and calculate accuracy metrics.
 
@@ -545,37 +578,23 @@ def train_susceptibility_model(image_sus, label, split):
 
     training_sus = sample_all_sus.filter(ee.Filter.lt('random', split))
     validation_sus = sample_all_sus.filter(ee.Filter.gte('random', split))
-    print('Training sus first: ',training_sus.first().getInfo())
-    classifier_sus = ee.Classifier.smileRandomForest(60).train(
-        features=training_sus,
-        classProperty='label',
-        inputProperties=bands_sus
-    )
 
+    classifier_sus = train_classifier(training_sus, bands_sus)
+    
     classifier_prob = classifier_sus.setOutputMode('PROBABILITY')
 
     flood_prob = image_sus.classify(classifier_prob)
 
-    def calculate_metrics(validation, classifier):
-        validation_classified = validation.classify(classifier)
-        validation_accuracy = validation_classified.errorMatrix('label', 'classification')
-
-        f1_score = validation_accuracy.fscore().getInfo()[1] if len(validation_accuracy.fscore().getInfo()) > 1 else None
-        producer_accuracy = validation_accuracy.producersAccuracy().getInfo()[1] if len(validation_accuracy.producersAccuracy().getInfo()) > 1 else None
-        consumer_accuracy = validation_accuracy.consumersAccuracy().getInfo()[1] if len(validation_accuracy.consumersAccuracy().getInfo()) > 1 else None
-
-        return f1_score, producer_accuracy, consumer_accuracy
-
-    f1_score, producer_accuracy, consumer_accuracy = calculate_metrics(validation_sus, classifier_sus)
-
-    print("Validation F1 Score:", f1_score)
-    print("Validation Producer Accuracy:", producer_accuracy)
-    print("Validation Consumer Accuracy:", consumer_accuracy)
-
+    results = calculate_accuracy_metrics(training_sus, validation_sus, classifier_sus)
+    results = results.round(2)
+    results.to_csv(f'{city}_flood_susceptibility_accuracy.csv', index=True)
+    print('Flood Susceptibility Mapping Accuracy Results: ', results)
+    
+    
     return flood_prob
 
 # Example usage for susceptibility analysis
-def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split):
+def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split, city):
     # Prepare Landsat images
     landsat_filtered = prepare_landsat_images(aoi, endDate)
 
@@ -584,10 +603,8 @@ def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split):
 
     # Create sample feature collection
     label_new = create_sample_feature_collection(flood_binary.rename('label'), True, aoi, num_samples)
-    print('Size of label collection:', label_new.size().getInfo())
-
     # Train susceptibility model
-    flood_prob = train_susceptibility_model(image_sus, label_new, split)
+    flood_prob = train_susceptibility_model(image_sus, label_new, split, city)
 
     return flood_prob
 
@@ -633,7 +650,7 @@ def quantile_based_categorization(susceptibility_layer, aoi):
 
 # Exposure Analysis
 
-def calculate_flood_exposure(flood_binary, aoi, export=False):
+def calculate_flood_exposure(flood_binary, aoi, export=False, city=None):
     """
     Calculate the population exposed to the flood based on the flood layer.
 
@@ -646,6 +663,9 @@ def calculate_flood_exposure(flood_binary, aoi, export=False):
     ee.Number: Total population exposed to the flood.
     ee.Number: Total population in the study area.
     """
+    
+    if city is None:
+        city = 'city'
     # Load population dataset
     population = ee.ImageCollection('WorldPop/GP/100m/pop')\
                     .filter(ee.Filter.eq('year', 2020))\
@@ -693,7 +713,7 @@ def calculate_flood_exposure(flood_binary, aoi, export=False):
 
 
 
-def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=False):
+def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=False, city=None):
     """
     Calculate exposure for population, nighttime light, and land cover for each susceptibility level or flood map.
 
@@ -708,6 +728,9 @@ def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=Fal
     Returns:
     pd.DataFrame: Dataframe with exposure information.
     """
+    if city is None:
+        city = 'city'
+    
         # Define remap function for landcover
     def remapper(image):
         return image.remap([1, 2, 4, 5, 7, 8, 9, 10, 11], [1, 2, 3, 4, 5, 6, 7, 8, 9])
@@ -727,6 +750,7 @@ def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=Fal
     # Initialize results dictionary with descriptive land cover names
     results = {
         'Susceptibility Level': [],
+        'Category': [],
         'Exposed Population': [],
         'Exposed Nighttime Light': [],
         'lulc_water': [],
@@ -737,8 +761,8 @@ def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=Fal
         'lulc_bare_ground': [],
         'lulc_snow_ice': [],
         'lulc_clouds': [],
-        'lulc_rangeland': [],
-        'Category': []
+        'lulc_rangeland': []
+        
     }
     
     if flood_map:
@@ -802,7 +826,8 @@ def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=Fal
             results[lulc_name].append(landcover_areas.get(str(lulc_code), 0))
         
     # Convert results to dataframe
-    df = pd.DataFrame(results.round(2))
+    df = pd.DataFrame(results)
+    df = df.round(2)
     
     if export==True:
         df.to_csv(f'{city}_exposure_df.csv', index=False)
