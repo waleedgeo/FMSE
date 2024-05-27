@@ -254,7 +254,7 @@ def label_non_flooded(flood_binary_layer, aoi):
     
     return combined_layer.rename('label')
 
-def create_sample_feature_collection(flood_layer, flood_unmask, aoi, num_samples, class_band='label', scale=20):
+def create_sample_feature_collection(flood_layer, flood_unmask, aoi, num_samples, class_band='label', scale=30):
     """
     Create a stratified sample feature collection from the flood layer.
 
@@ -307,7 +307,7 @@ def prepare_s1_image(s1_post, additional_bands, aoi):
         image = image.addBands(band)
     return image
 
-def create_training_and_validation_samples(image, label_fc, split, scale=20):
+def create_training_and_validation_samples(image, label_fc, split, scale=30):
     """
     Create training and validation samples from the prepared image and label.
 
@@ -667,11 +667,14 @@ def calculate_flood_exposure(flood_binary, aoi, export=False, city=None):
     if city is None:
         city = 'city'
     # Load population dataset
+    flood_binary = flood_binary.reproject(crs='EPSG:3395', scale=10)
+    
     population = ee.ImageCollection('WorldPop/GP/100m/pop')\
                     .filter(ee.Filter.eq('year', 2020))\
                     .mosaic()\
-                    .clip(aoi)
-    
+                    .clip(aoi).reproject(crs='EPSG:3395', scale=92.77)\
+                    .rename('population')
+                    
     # Mask non-flooded areas
     flood_exposure = population.updateMask(flood_binary.eq(1))
     
@@ -679,16 +682,16 @@ def calculate_flood_exposure(flood_binary, aoi, export=False, city=None):
     total_exposed_population = flood_exposure.reduceRegion(
         reducer=ee.Reducer.sum(),
         geometry=aoi,
-        scale=1000,
-        maxPixels=1e12
+        scale=92.7,
+        maxPixels=1e13
     ).get('population')
     
      # Calculate total population in the study area
     total_population = population.reduceRegion(
         reducer=ee.Reducer.sum(),
         geometry=aoi,
-        scale=1000,
-        maxPixels=1e12
+        scale=92.7,
+        maxPixels=1e13
     ).get('population')
     
     
@@ -713,7 +716,9 @@ def calculate_flood_exposure(flood_binary, aoi, export=False, city=None):
 
 
 
-def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=False, city=None):
+
+
+def calculate_exposure_df(susceptibility_layer, aoi, crs='EPSG:3395', flood_map=False, export=False, city=None):
     """
     Calculate exposure for population, nighttime light, and land cover for each susceptibility level or flood map.
 
@@ -731,20 +736,30 @@ def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=Fal
     if city is None:
         city = 'city'
     
+    # if aoi is ee.Feature, convert it to ee.Geometry
+    if isinstance(aoi, ee.Feature):
+        aoi = aoi.geometry()
+    
+    aoi = aoi.simplify(maxError=100)
+    
         # Define remap function for landcover
     def remapper(image):
         return image.remap([1, 2, 4, 5, 7, 8, 9, 10, 11], [1, 2, 3, 4, 5, 6, 7, 8, 9])
-
+    
+    #susceptibility_layer = susceptibility_layer.reproject(crs=crs, scale=30)
     # Load datasets
     population = ee.ImageCollection('WorldPop/GP/100m/pop')\
                     .filter(ee.Filter.eq('year', 2020))\
                     .mosaic()\
-                    .clip(aoi).rename('b1')
-    nightlight = ee.Image('projects/sat-io/open-datasets/npp-viirs-ntl/LongNTL_2022').clip(aoi).rename('b1')
+                    .clip(aoi).rename('b1')\
+                    #.reproject(crs=crs, scale=100)
+                    
+    nightlight = ee.Image('projects/sat-io/open-datasets/npp-viirs-ntl/LongNTL_2022').clip(aoi).rename('b1')#.reproject(crs=crs, scale=500)
     landcover = ee.ImageCollection('projects/sat-io/open-datasets/landcover/ESRI_Global-LULC_10m_TS')\
                     .filterDate('2022-01-01', '2022-12-31')\
                     .map(remapper)\
-                    .mosaic().clip(aoi).rename('b1')
+                    .mosaic().clip(aoi).rename('b1')\
+                    #.reproject(crs=crs, scale=500)
     
 
     # Initialize results dictionary with descriptive land cover names
@@ -786,25 +801,29 @@ def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=Fal
         exposed_population = level_population.reduceRegion(
             reducer=ee.Reducer.sum(),
             geometry=aoi,
-            scale=1000,
-            maxPixels=1e12
+            scale=100,
+            maxPixels=1e13
         ).get('b1').getInfo()
 
         # Calculate total exposed nighttime light
         exposed_nightlight = level_nightlight.reduceRegion(
             reducer=ee.Reducer.sum(),
             geometry=aoi,
-            scale=1000,
-            maxPixels=1e12
+            scale=500,
+            maxPixels=1e13
         ).get('b1').getInfo()
 
         # Calculate land cover area for each class
         landcover_areas = level_landcover.reduceRegion(
             reducer=ee.Reducer.frequencyHistogram(),
             geometry=aoi,
-            scale=1000,
-            maxPixels=1e12
+            scale=100,
+            maxPixels=1e13
         ).get('b1').getInfo()
+        
+        # Calculate area for each land cover class in square meters
+        pixel_area = 100 * 100  # 100m resolution, so each pixel is 10000 square meters
+        landcover_areas_m2 = {str(k): v * pixel_area for k, v in landcover_areas.items()}
 
         # Append results to the dictionary
         results['Susceptibility Level'].append(level)
@@ -822,17 +841,56 @@ def calculate_exposure_df(susceptibility_layer, aoi, flood_map=False, export=Fal
             'lulc_clouds': 8,
             'lulc_rangeland': 9
         }
+        
         for lulc_name, lulc_code in landcover_classes.items():
-            results[lulc_name].append(landcover_areas.get(str(lulc_code), 0))
+            results[lulc_name].append(landcover_areas_m2.get(str(lulc_code), 0))
         
     # Convert results to dataframe
-    df = pd.DataFrame(results)
-    df = df.round(2)
+    exposure_df = pd.DataFrame(results)
+    
+    
+    # Convert population values to integers
+    exposure_df['Exposed Population'] = exposure_df['Exposed Population'].astype(int)
+
+    # Convert LULC areas from m2 to km2
+    lulc_columns = [
+        'lulc_water', 'lulc_trees', 'lulc_flooded_vegetation', 'lulc_crops',
+        'lulc_built_area', 'lulc_bare_ground', 'lulc_snow_ice', 'lulc_clouds', 'lulc_rangeland'
+    ]
+
+    for column in lulc_columns:
+        exposure_df[column] = exposure_df[column] / 10000 # Convert m2 to hectare
+
+    # Calculate the total values for population, nighttime light, and LULC areas
+    total_population = exposure_df['Exposed Population'].sum()
+    total_ntl = exposure_df['Exposed Nighttime Light'].sum()
+    total_lulc = exposure_df[lulc_columns].sum()
+
+    # Add percentage columns
+    exposure_df['population_p'] = (exposure_df['Exposed Population'] / total_population) * 100
+    exposure_df['ntl_p'] = (exposure_df['Exposed Nighttime Light'] / total_ntl) * 100
+
+    for column in lulc_columns:
+        percentage_column = column + '_p'
+        exposure_df[percentage_column] = (exposure_df[column] / total_lulc[column]) * 100
+
+    # Round the percentage columns to 2 decimal places
+    percentage_columns = ['population_p', 'ntl_p'] + [col + '_p' for col in lulc_columns]
+    exposure_df[percentage_columns] = exposure_df[percentage_columns].round(2)
+
+    # round lulc columns to 2 decimal places
+    exposure_df[lulc_columns] = exposure_df[lulc_columns].round(2)
+    
+    # round nighttime light column to 2 decimal places
+    exposure_df['Exposed Nighttime Light'] = exposure_df['Exposed Nighttime Light'].round(2)
+
+    # Fill NaN values with 0
+    exposure_df.fillna(0, inplace=True)
     
     if export==True:
-        df.to_csv(f'{city}_exposure_df.csv', index=False)
+        exposure_df.to_csv(f'{city}_exposure_df.csv', index=False)
     
-    return df
+    return exposure_df
 
 
 
@@ -926,11 +984,50 @@ def visualize_exposure(df, export=False):
 
 
 
-# export
+
+# export to asset
+
+def export_image_to_asset(image, description, asset_id, region, scale):
+    """
+    Export an ee.Image to an Earth Engine asset and monitor the upload progress.
+
+    Parameters:
+    image (ee.Image): The image to export.
+    description (str): A description for the export task.
+    asset_id (str): The destination asset ID.
+    region (ee.Geometry): The region to export.
+    scale (int): The scale (in meters) to export the image.
+
+    Returns:
+    None
+    """
+    # Create the export task
+    export_task = ee.batch.Export.image.toAsset(
+        image=image,
+        description=description,
+        assetId=asset_id,
+        region=region,
+        scale=scale,
+        maxPixels=1e13
+    )
+
+    # Start the export task
+    export_task.start()
+
+    # Function to monitor the export task
+    def monitor_task(task):
+        while task.active():
+            print('Task status:', task.status())
+            time.sleep(10)
+        print('Task finished:', task.status())
+
+    # Monitor the export task
+    monitor_task(export_task)
 
 
-def export_layers(aoi, flood_binary, flood_class, flood_mapped, susceptibility_layer, susceptibility_category_layer,
-                  export_flood_binary=True, export_flood_class=True, export_flood_mapped=True,
+# export to gdrive
+def export_layers(aoi, city, flood_layer, flood_class, flood_mapped, susceptibility_layer, susceptibility_category_layer,
+                  export_flood_layer=True, export_flood_class=True, export_flood_mapped=True,
                   export_susceptibility_layer=True, export_susceptibility_category_layer=True):
     """
     Export specified layers to Google Drive.
@@ -951,9 +1048,9 @@ def export_layers(aoi, flood_binary, flood_class, flood_mapped, susceptibility_l
 
     tasks = []
     aoi = aoi.geometry()
-    if export_flood_binary:
+    if export_flood_layer:
         flood_binary_task = ee.batch.Export.image.toDrive(
-            image=flood_binary,
+            image=flood_layer,
             description=f'{city}_flood_mask_layer',
             folder='FMSE',
             scale=10,
@@ -1022,5 +1119,3 @@ def export_layers(aoi, flood_binary, flood_class, flood_mapped, susceptibility_l
 
     # Monitor the export tasks
     monitor_tasks(tasks)
-
-
