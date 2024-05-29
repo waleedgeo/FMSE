@@ -444,6 +444,21 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city):
     bandNames = image.bandNames().getInfo()
     classifier = train_classifier(training, bandNames)
 
+    # Get the feature importance
+    importances = classifier.explain().get('importance')
+
+    # Convert the feature importance dictionary to a Pandas DataFrame
+    importance_dict = importances.getInfo()
+    importance_df = pd.DataFrame(list(importance_dict.items()), columns=['Feature', 'Importance'])
+
+    # Sort the DataFrame by importance in descending order
+    importance_df = importance_df.sort_values(by='Importance', ascending=False)
+
+    # Save the DataFrame to a CSV file
+    importance_df.to_csv(f'{city}_feature_importance_mapping.csv', index=False)
+
+    print('Feature Importance:', importance_df.round(2))
+    
     # Classify the image
     model_output = classify_image(image, classifier, bandNames)
     print('Done with classification...')
@@ -581,6 +596,21 @@ def train_susceptibility_model(image_sus, label, split, city):
 
     classifier_sus = train_classifier(training_sus, bands_sus)
     
+    # Get the feature importance
+    importances = classifier_sus.explain().get('importance')
+
+    # Convert the feature importance dictionary to a Pandas DataFrame
+    importance_dict = importances.getInfo()
+    importance_df = pd.DataFrame(list(importance_dict.items()), columns=['Feature', 'Importance'])
+
+    # Sort the DataFrame by importance in descending order
+    importance_df = importance_df.sort_values(by='Importance', ascending=False)
+
+    # Save the DataFrame to a CSV file
+    importance_df.to_csv(f'{city}_feature_importance_sus.csv', index=False)
+
+    print('Feature Importance:', importance_df.round(2))
+    
     classifier_prob = classifier_sus.setOutputMode('PROBABILITY')
 
     flood_prob = image_sus.classify(classifier_prob)
@@ -666,13 +696,12 @@ def calculate_flood_exposure(flood_binary, aoi, export=False, city=None):
     
     if city is None:
         city = 'city'
-    # Load population dataset
-    flood_binary = flood_binary.reproject(crs='EPSG:3395', scale=10)
+
     
     population = ee.ImageCollection('WorldPop/GP/100m/pop')\
                     .filter(ee.Filter.eq('year', 2020))\
                     .mosaic()\
-                    .clip(aoi).reproject(crs='EPSG:3395', scale=92.77)\
+                    .clip(aoi)\
                     .rename('population')
                     
     # Mask non-flooded areas
@@ -682,7 +711,7 @@ def calculate_flood_exposure(flood_binary, aoi, export=False, city=None):
     total_exposed_population = flood_exposure.reduceRegion(
         reducer=ee.Reducer.sum(),
         geometry=aoi,
-        scale=92.7,
+        scale=100,
         maxPixels=1e13
     ).get('population')
     
@@ -690,7 +719,7 @@ def calculate_flood_exposure(flood_binary, aoi, export=False, city=None):
     total_population = population.reduceRegion(
         reducer=ee.Reducer.sum(),
         geometry=aoi,
-        scale=92.7,
+        scale=100,
         maxPixels=1e13
     ).get('population')
     
@@ -715,52 +744,45 @@ def calculate_flood_exposure(flood_binary, aoi, export=False, city=None):
     return total_exposed_population, total_population
 
 
-
-
-
 def calculate_exposure_df(susceptibility_layer, aoi, crs='EPSG:3395', flood_map=False, export=False, city=None):
     """
     Calculate exposure for population, nighttime light, and land cover for each susceptibility level or flood map.
 
     Parameters:
     susceptibility_layer (ee.Image): Flood susceptibility layer or flood map.
-    population_dataset (str): Path to the population dataset.
-    nightlight_dataset (str): Path to the nighttime light dataset.
-    landcover_dataset (str): Path to the land cover dataset.
     aoi (ee.Geometry): Area of Interest.
+    crs (str): Coordinate Reference System for reprojecting images. Default is 'EPSG:3395'.
     flood_map (bool): Flag to indicate if susceptibility categories or flood map should be used.
+    export (bool): Flag to indicate if the results should be exported to a CSV file.
+    city (str): Name of the city for export file naming.
 
     Returns:
     pd.DataFrame: Dataframe with exposure information.
     """
     if city is None:
         city = 'city'
-    
-    # if aoi is ee.Feature, convert it to ee.Geometry
+
+    # If aoi is ee.Feature, convert it to ee.Geometry
     if isinstance(aoi, ee.Feature):
         aoi = aoi.geometry()
     
     aoi = aoi.simplify(maxError=100)
     
-        # Define remap function for landcover
+    # Define remap function for landcover
     def remapper(image):
         return image.remap([1, 2, 4, 5, 7, 8, 9, 10, 11], [1, 2, 3, 4, 5, 6, 7, 8, 9])
     
-    #susceptibility_layer = susceptibility_layer.reproject(crs=crs, scale=30)
     # Load datasets
     population = ee.ImageCollection('WorldPop/GP/100m/pop')\
                     .filter(ee.Filter.eq('year', 2020))\
                     .mosaic()\
-                    .clip(aoi).rename('b1')\
-                    #.reproject(crs=crs, scale=100)
+                    .clip(aoi).rename('b1')
                     
-    nightlight = ee.Image('projects/sat-io/open-datasets/npp-viirs-ntl/LongNTL_2022').clip(aoi).rename('b1')#.reproject(crs=crs, scale=500)
+    nightlight = ee.Image('projects/sat-io/open-datasets/npp-viirs-ntl/LongNTL_2022').clip(aoi).rename('b1')
     landcover = ee.ImageCollection('projects/sat-io/open-datasets/landcover/ESRI_Global-LULC_10m_TS')\
                     .filterDate('2022-01-01', '2022-12-31')\
                     .map(remapper)\
-                    .mosaic().clip(aoi).rename('b1')\
-                    #.reproject(crs=crs, scale=500)
-    
+                    .mosaic().clip(aoi).rename('b1')
 
     # Initialize results dictionary with descriptive land cover names
     results = {
@@ -777,9 +799,8 @@ def calculate_exposure_df(susceptibility_layer, aoi, crs='EPSG:3395', flood_map=
         'lulc_snow_ice': [],
         'lulc_clouds': [],
         'lulc_rangeland': []
-        
     }
-    
+
     if flood_map:
         susceptibility_levels = [1]
         susceptibility_layer = susceptibility_layer.gt(0).selfMask()
@@ -788,7 +809,7 @@ def calculate_exposure_df(susceptibility_layer, aoi, crs='EPSG:3395', flood_map=
         # Define quantile-based categories
         susceptibility_levels = range(1, 6)
         category_names = ['Very Low', 'Low', 'Moderate', 'High', 'Very High']
-    
+
     # Calculate exposure for each susceptibility level
     for level, category in zip(susceptibility_levels, category_names):
         # Mask areas that do not match the current susceptibility level
@@ -813,23 +834,27 @@ def calculate_exposure_df(susceptibility_layer, aoi, crs='EPSG:3395', flood_map=
             maxPixels=1e13
         ).get('b1').getInfo()
 
-        # Calculate land cover area for each class
-        landcover_areas = level_landcover.reduceRegion(
-            reducer=ee.Reducer.frequencyHistogram(),
+        # Calculate land cover area for each class using pixel area method
+        pixel_area_image = ee.Image.pixelArea().addBands(level_landcover)
+        landcover_areas = pixel_area_image.reduceRegion(
+            reducer=ee.Reducer.sum().group(
+                groupField=1,
+                groupName='b1'
+            ),
             geometry=aoi,
             scale=100,
             maxPixels=1e13
-        ).get('b1').getInfo()
-        
-        # Calculate area for each land cover class in square meters
-        pixel_area = 100 * 100  # 100m resolution, so each pixel is 10000 square meters
-        landcover_areas_m2 = {str(k): v * pixel_area for k, v in landcover_areas.items()}
+        ).get('groups').getInfo()
+
+        # Convert areas from m2 to hectares and flatten the structure
+        landcover_areas_ha = {int(group['b1']): group['sum'] / 10000 for group in landcover_areas}
 
         # Append results to the dictionary
         results['Susceptibility Level'].append(level)
         results['Category'].append(category)
         results['Exposed Population'].append(exposed_population)
         results['Exposed Nighttime Light'].append(exposed_nightlight)
+        
         landcover_classes = {
             'lulc_water': 1,
             'lulc_trees': 2,
@@ -843,24 +868,18 @@ def calculate_exposure_df(susceptibility_layer, aoi, crs='EPSG:3395', flood_map=
         }
         
         for lulc_name, lulc_code in landcover_classes.items():
-            results[lulc_name].append(landcover_areas_m2.get(str(lulc_code), 0))
+            results[lulc_name].append(landcover_areas_ha.get(lulc_code, 0))
         
     # Convert results to dataframe
     exposure_df = pd.DataFrame(results)
     
-    
     # Convert population values to integers
     exposure_df['Exposed Population'] = exposure_df['Exposed Population'].astype(int)
 
-    # Convert LULC areas from m2 to km2
     lulc_columns = [
         'lulc_water', 'lulc_trees', 'lulc_flooded_vegetation', 'lulc_crops',
         'lulc_built_area', 'lulc_bare_ground', 'lulc_snow_ice', 'lulc_clouds', 'lulc_rangeland'
     ]
-
-    for column in lulc_columns:
-        exposure_df[column] = exposure_df[column] / 10000 # Convert m2 to hectare
-
     # Calculate the total values for population, nighttime light, and LULC areas
     total_population = exposure_df['Exposed Population'].sum()
     total_ntl = exposure_df['Exposed Nighttime Light'].sum()
@@ -878,20 +897,19 @@ def calculate_exposure_df(susceptibility_layer, aoi, crs='EPSG:3395', flood_map=
     percentage_columns = ['population_p', 'ntl_p'] + [col + '_p' for col in lulc_columns]
     exposure_df[percentage_columns] = exposure_df[percentage_columns].round(2)
 
-    # round lulc columns to 2 decimal places
+    # Round lulc columns to 2 decimal places
     exposure_df[lulc_columns] = exposure_df[lulc_columns].round(2)
-    
-    # round nighttime light column to 2 decimal places
+
+    # Round nighttime light column to 2 decimal places
     exposure_df['Exposed Nighttime Light'] = exposure_df['Exposed Nighttime Light'].round(2)
 
     # Fill NaN values with 0
     exposure_df.fillna(0, inplace=True)
     
-    if export==True:
+    if export:
         exposure_df.to_csv(f'{city}_exposure_df.csv', index=False)
     
     return exposure_df
-
 
 
 
