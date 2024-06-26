@@ -95,7 +95,7 @@ def calculate_zscore(s1_pre, s1_post, aoi):
         zscore_asc = calc_zscore(s1_pre, s1_post, 'ASCENDING')
         return ee.ImageCollection.fromImages([zscore_des, zscore_asc]).mean().clip(aoi)
 
-def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd, under_estimate):
+def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd):
     
     """
     Generate flood mask based on Z-score and various thresholds.
@@ -125,9 +125,7 @@ def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd, under_estim
     if slp_thd is None:
         slp_thd = 10
     
-    if under_estimate is None:
-        under_estimate = False
-    
+
     # JRC water mask
     jrc = ee.ImageCollection("JRC/GSW1_4/MonthlyHistory").filterDate('2016-01-01', '2022-01-01')
     jrcvalid = jrc.map(lambda x: x.gt(0)).sum()
@@ -148,14 +146,13 @@ def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd, under_estim
     # Combine flood classes into a single layer
     
 
-    if under_estimate==True:
-        # lowest probability vv+vh 
-        flood_layer = flood_class.where(flood_class.eq(3), 1).where(flood_class.neq(3), 2)
-        flood_layer = flood_layer.selfMask().rename('label')
-    else:
-        # highest probability combining all vv vh vv+vh flooded classes
-        flood_layer = flood_class.where(flood_class.eq(1), 1).where(flood_class.eq(2), 1).where(flood_class.eq(3), 1).where(flood_class.eq(4), 2)
-        flood_layer = flood_layer.where(jrcmask.eq(0), 2).where(flood_class.eq(0), 2).selfMask().rename('label')
+    # lowest probability vv+vh 
+    flood_layer = flood_class.where(flood_class.eq(3), 1).where(flood_class.neq(3), 2)
+    flood_layer = flood_layer.selfMask().rename('label')
+    #else:
+    #    # highest probability combining all vv vh vv+vh flooded classes
+    #    flood_layer = flood_class.where(flood_class.eq(1), 1).where(flood_class.eq(2), 1).where(flood_class.eq(3), 1).where(flood_class.eq(4), 2)
+    #    flood_layer = flood_layer.where(jrcmask.eq(0), 2).where(flood_class.eq(0), 2).selfMask().rename('label')
     
 
     
@@ -426,7 +423,7 @@ def calculate_accuracy_metrics(training, validation, classifier):
     return results
 
 
-def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city):
+def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export=False, accuracy=False):
     # Prepare datasets
     dem, slope, aspect, dtriver = prepare_datasets(aoi)
     print('Done with preparing datasets...')
@@ -463,10 +460,14 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city):
     model_output = classify_image(image, classifier, bandNames)
     print('Done with classification...')
     # Calculate and print accuracy metrics
-    results = calculate_accuracy_metrics(training, validation, classifier)
-    results = results.round(2)
-    results.to_csv(f'{city}_flood_mapping_accuracy.csv', index=True)
-    print('Flood Mapping Accuracy Results: ',results)
+    
+    if accuracy==True:
+        results = calculate_accuracy_metrics(training, validation, classifier)
+        results = results.round(2)
+        print('Flood Mapping Accuracy Results: ',results)
+        if export==True:
+            results.to_csv(f'{city}_flood_mapping_accuracy.csv', index=True)
+        
     print('Done ...')
     return model_output
 
@@ -568,7 +569,7 @@ def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
     return image_sus
 
 
-def train_susceptibility_model(image_sus, label, split, city):
+def train_susceptibility_model(image_sus, label, split, city, export=False, accuracy=False):
     """
     Train a susceptibility model and calculate accuracy metrics.
 
@@ -615,16 +616,18 @@ def train_susceptibility_model(image_sus, label, split, city):
 
     flood_prob = image_sus.classify(classifier_prob)
 
-    results = calculate_accuracy_metrics(training_sus, validation_sus, classifier_sus)
-    results = results.round(2)
-    results.to_csv(f'{city}_flood_susceptibility_accuracy.csv', index=True)
-    print('Flood Susceptibility Mapping Accuracy Results: ', results)
+    if accuracy==True:
+        results = calculate_accuracy_metrics(training_sus, validation_sus, classifier_sus)
+        results = results.round(2)
+        print('Flood Susceptibility Mapping Accuracy Results: ', results)
+        if export==True:
+            results.to_csv(f'{city}_flood_susceptibility_accuracy.csv', index=True)
     
     
     return flood_prob
 
 # Example usage for susceptibility analysis
-def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split, city):
+def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split, city, export=False, accuracy=False):
     # Prepare Landsat images
     landsat_filtered = prepare_landsat_images(aoi, endDate)
 
@@ -634,7 +637,7 @@ def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split, city
     # Create sample feature collection
     label_new = create_sample_feature_collection(flood_binary.rename('label'), True, aoi, num_samples)
     # Train susceptibility model
-    flood_prob = train_susceptibility_model(image_sus, label_new, split, city)
+    flood_prob = train_susceptibility_model(image_sus, label_new, split, city, export, accuracy)
 
     return flood_prob
 
