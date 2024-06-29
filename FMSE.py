@@ -9,6 +9,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+import ipywidgets as widgets
+from IPython.display import display
+import datetime
+import geemap
+
+
+
 
 def boundary(feature):
     '''
@@ -429,14 +436,14 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export=Fa
     print('Done with preparing datasets...')
     # Create sample feature collection
     label_fc = create_sample_feature_collection(flood_layer,False, aoi, num_samples)
-    print('Done with creating sample feature collection...')
+    #print('Done with creating sample feature collection...')
     # Prepare image for classification
     additional_bands = [dem]#, slope, aspect, dtriver]
     image = prepare_s1_image(s1_post, additional_bands, aoi)
 
     # Create training and validation samples
     training, validation = create_training_and_validation_samples(image, label_fc, split)
-    print('Done with creating training and validation samples...')
+    #print('Done with creating training and validation samples...')
     # Train the classifier
     bandNames = image.bandNames().getInfo()
     classifier = train_classifier(training, bandNames)
@@ -451,15 +458,14 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export=Fa
     # Sort the DataFrame by importance in descending order
     importance_df = importance_df.sort_values(by='Importance', ascending=False)
 
-    # Save the DataFrame to a CSV file
-    importance_df.to_csv(f'{city}_feature_importance_mapping.csv', index=False)
 
-    print('Feature Importance:', importance_df.round(2))
+    print('\n Feature Importance:', importance_df.round(2))
     
     # Classify the image
     model_output = classify_image(image, classifier, bandNames)
     print('Done with classification...')
     # Calculate and print accuracy metrics
+    
     
     if accuracy==True:
         results = calculate_accuracy_metrics(training, validation, classifier)
@@ -467,7 +473,8 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export=Fa
         print('Flood Mapping Accuracy Results: ',results)
         if export==True:
             results.to_csv(f'{city}_flood_mapping_accuracy.csv', index=True)
-        
+    if export==True:
+        importance_df.to_csv(f'{city}_feature_importance_mapping.csv', index=False)
     print('Done ...')
     return model_output
 
@@ -607,9 +614,6 @@ def train_susceptibility_model(image_sus, label, split, city, export=False, accu
     # Sort the DataFrame by importance in descending order
     importance_df = importance_df.sort_values(by='Importance', ascending=False)
 
-    # Save the DataFrame to a CSV file
-    importance_df.to_csv(f'{city}_feature_importance_sus.csv', index=False)
-
     print('Feature Importance:', importance_df.round(2))
     
     classifier_prob = classifier_sus.setOutputMode('PROBABILITY')
@@ -623,7 +627,8 @@ def train_susceptibility_model(image_sus, label, split, city, export=False, accu
         if export==True:
             results.to_csv(f'{city}_flood_susceptibility_accuracy.csv', index=True)
     
-    
+    if export==True:
+        importance_df.to_csv(f'{city}_feature_importance_susceptibility.csv', index=False)
     return flood_prob
 
 # Example usage for susceptibility analysis
@@ -909,7 +914,7 @@ def calculate_exposure_df(susceptibility_layer, aoi, crs='EPSG:3395', flood_map=
     # Fill NaN values with 0
     exposure_df.fillna(0, inplace=True)
     
-    if export:
+    if export == True:
         exposure_df.to_csv(f'{city}_exposure_df.csv', index=False)
     
     return exposure_df
@@ -1140,3 +1145,462 @@ def export_layers(aoi, city, flood_layer, flood_class, flood_mapped, susceptibil
 
     # Monitor the export tasks
     monitor_tasks(tasks)
+
+
+
+# -------------- APP Codes ----------------------------------------
+
+Map = geemap.Map()
+# Define widgets
+w_case_study = widgets.Dropdown(
+    options=[
+        ('None', 'default'),
+        ('Shikarpur', 'shikarpur'),
+        ('Nhamatanda', 'nhamatanda'),
+        ('Ernukulam', 'ernukulam'),
+        ('Sylhet', 'sylhet')
+    ],
+    value='default',
+    description='Case Study:',
+)
+
+w_startDate = widgets.DatePicker(
+    description='Start Date',
+    disabled=False
+)
+
+w_endDate = widgets.DatePicker(
+    description='End Date',
+    disabled=False
+)
+
+w_preDays = widgets.IntText(
+    value=0,
+    description='Pre Days:',
+    disabled=False
+)
+
+w_postDays = widgets.IntText(
+    value=0,
+    description='Post Days:',
+    disabled=False
+)
+
+w_nsamples = widgets.IntText(
+    value=1000,
+    description='Samples:',
+    disabled=False
+)
+
+w_split_value = widgets.FloatText(
+    value=0.8,
+    description='Split Value:',
+    disabled=False
+)
+
+w_accuracy = widgets.Checkbox(
+    value=False,
+    description='Accuracy Assessment',
+    disabled=False
+)
+
+w_analysis_type = widgets.Dropdown(
+    options=[
+        ('Flood Mapping', 'FM'),
+        ('Flood Mapping + Susceptibility', 'FMS'),
+        ('All (Flood Mapping + SUS + Exposure)', 'FMSE')
+    ],
+    value='FM',
+    description=' Type:',
+)
+
+w_export = widgets.Checkbox(
+    value=False,
+    description='Export Results',
+    disabled=False
+)
+
+w_run_button = widgets.Button(
+    description='RUN',
+    button_style='success',
+    tooltip='Run the analysis'
+)
+
+
+# Output for logs
+w_output = widgets.Output(layout={'border': '2px solid #8B4513', 'height': '200px', 'overflow': 'auto', 'padding': '10px'})
+
+
+# Region selection widgets
+region_options = [
+    'Select an option',  # default to map bounds
+    'Draw shapes on map',  # rectangle, polygon. If a point, use next option
+    'Input point and buffer',  # input point coordinates and buffer distance
+    'Rectangle from BBox',  # input bounding box coordinates
+    'Upload GeoJSON',  # upload geometry in .geojson
+    'Select ADM2 Name'  # select ADM2 name and process
+]
+
+w_region = widgets.Dropdown(
+    options=region_options,
+    description='Region:'
+)
+
+w_point = widgets.Text(
+    description='Point (lat, lon):'
+)
+
+w_buffer = widgets.FloatText(
+    description='Buffer (km):'
+)
+
+w_bbox = widgets.Text(
+    description='BBox (xmin, ymin, xmax, ymax):'
+)
+
+w_geojson = widgets.Text(
+    description='Link to GeoJSON file:'
+)
+
+w_adm2 = widgets.Text(
+    description='ADM2 Name:'
+)
+
+w_region_detail = widgets.VBox()
+
+# Function to update the region detail widget based on selection
+def update_region_detail(*args):
+    if w_region.value == 'Input point and buffer':
+        w_region_detail.children = [w_point, w_buffer]
+    elif w_region.value == 'Rectangle from BBox':
+        w_region_detail.children = [w_bbox]
+    elif w_region.value == 'Select ADM2 Name':
+        w_region_detail.children = [w_adm2]
+    else:
+        w_region_detail.children = []
+
+w_region.observe(update_region_detail, 'value')
+
+# Display the region selection widgets
+#display(case_study, w_region, w_region_detail)
+
+# Function to set parameters based on case study selection
+def set_case_study_params(change):
+    if w_case_study.value == 'shikarpur':
+        w_startDate.value = datetime.date(2022, 3, 1)
+        w_endDate.value = datetime.date(2022, 8, 1)
+        w_preDays.value = 60
+        w_postDays.value = 30
+        w_region.value = 'Select ADM2 Name'
+        w_adm2.value = 'Shikarpur'
+        
+        
+        
+        # Set other parameters specific to Shikarpur
+    elif w_case_study.value == 'nhamatanda':
+        w_startDate.value = datetime.date(2019, 1, 1)
+        w_endDate.value = datetime.date(2019, 3, 19)
+        w_preDays.value = 60
+        w_postDays.value = 1
+        w_region.value = 'Select ADM2 Name'
+        w_adm2.value = 'Nhamatanda'
+        
+        
+        # Set other parameters specific to Nhamatanda
+    elif w_case_study.value == 'ernukulam':
+        w_startDate.value = datetime.date(2018, 3, 1)
+        w_endDate.value = datetime.date(2018, 8, 7)
+        w_preDays.value = 60
+        w_postDays.value = 20
+        w_region.value = 'Select ADM2 Name'
+        w_adm2.value = 'Ernukulam'
+        
+        # Set other parameters specific to Ernukulam
+    elif w_case_study.value == 'sylhet':
+        w_startDate.value = datetime.date(2022, 1, 1)
+        w_endDate.value = datetime.date(2022, 5, 17)
+        w_preDays.value = 60
+        w_postDays.value = 10
+        w_region.value = 'Select ADM2 Name'
+        w_adm2.value = 'Sylhet'
+
+w_case_study.observe(set_case_study_params, names='value')
+
+def getRegion():
+    
+    global city_shp
+    
+    city_shp = None    
+    region = None
+    
+    if w_region.value == 'Draw shapes on map':
+        print('Use geometry drawn on map')
+        region = Map.user_roi
+
+    elif w_region.value == 'Input point and buffer':
+        coord = w_point.value.split(',')
+        coord = [float(a) for a in coord[:2]]
+        region = ee.Geometry.Point(coord).buffer(w_buffer.value * 1000)
+
+    elif w_region.value == 'Rectangle from BBox':
+        poly_coord = w_bbox.value.split(',')
+        poly_coord = [float(a) for a in poly_coord]
+        region = ee.Geometry.BBox(*poly_coord)
+
+    elif w_region.value == 'Upload GeoJSON':
+        url_geojson = w_geojson.value
+        with open(os.path.abspath(url_geojson), encoding="utf-8") as f:
+            geo_json = json.load(f)
+        if geo_json["type"] == "FeatureCollection":
+            region = ee.FeatureCollection(geo_json)
+        elif geo_json["type"] == "Feature":
+            region = ee.Geometry(geo_json['geometry'])
+
+    elif w_region.value == 'Select an option':
+        region = ee.Geometry.BBox(*Map.get_bounds())
+
+    elif w_region.value == 'Select ADM2 Name':
+        adm2_name = w_adm2.value
+        city_shp = ee.FeatureCollection('projects/earthengine-legacy/assets/projects/sat-io/open-datasets/geoboundaries/CGAZ_ADM2')\
+                    .filter(ee.Filter.eq('shapeName', adm2_name))
+                    
+        print(f"Selected ADM2 Name: {adm2_name}")
+        
+        bbox = city_shp.geometry().bounds()
+        region = ee.Geometry.Polygon(bbox.coordinates().get(0))
+
+    # if region not geometry convert to geometry
+    if not isinstance(region, ee.Geometry):
+        region = ee.Geometry(region)
+        
+    return region
+
+def get_flood_layer():
+    """
+    Get flood layer
+    """
+    
+    # Fetching pre and post-flood images
+    s1_pre = get_s1_col(startDate, predays, aoi).select(['VV', 'VH'])
+    s1_post = get_s1_col(endDate, postdays, aoi).select(['VV', 'VH'])
+
+    print('Images in S1 Pre: ', s1_pre.size().getInfo())
+    print('Images in S1 Post: ', s1_post.size().getInfo())
+
+    # Calculate Z-score
+    zscore = calculate_zscore(s1_pre, s1_post, aoi)
+
+    # Generate flood masks
+    flood_class, flood_layer = map_floods(zscore, aoi, zvv_value, zvh_value, water_value, elev_value, slope_value)
+
+    print('Done with flood masking...')    
+
+
+    flood_mapped = flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export, accuracy)
+    print('Done with flood mapping...')
+
+    return flood_class, flood_mapped
+
+
+
+# Define event handler
+def on_run_button_clicked(b):
+    with w_output:
+        
+        global aoi, num_samples, split, accuracy, analysis, export, startDate, endDate, predays, postdays, zvv_value, zvh_value, water_value, elev_value, slope_value, city
+        w_output.clear_output()
+        # Collect input values
+        city = 'FMSE'
+        aoi = getRegion()
+        num_samples = w_nsamples.value
+        split = w_split_value.value
+        accuracy = w_accuracy.value
+        analysis = w_analysis_type.value
+        export = w_export.value
+        
+        # print all input values
+
+        print('Selected Analysis Type: ', w_analysis_type.value)
+        print('Export Results: ', w_export.value)
+        print('Number of Samples: ', w_nsamples.value)
+        print('Split Value: ', w_split_value.value)
+        print('Accuracy Assessment: ', w_accuracy.value)
+        
+        print('\n ------------------')
+        
+        startDate = ee.Date(w_startDate.value.strftime('%Y-%m-%d'))
+        endDate = ee.Date(w_endDate.value.strftime('%Y-%m-%d'))
+        predays = w_preDays.value
+        postdays = w_postDays.value
+        
+        # Set default values
+        zvv_value = -3
+        zvh_value = -3
+        water_value = 75
+        elev_value = 900
+        slope_value = 15
+        
+        print('Analysis started...')
+        
+        print('Starting flood mapping ...')
+        flood_class, flood_mapped = get_flood_layer()
+        Map.centerObject(aoi, 10)
+        if city_shp is not None:
+            Map.addLayer(city_shp, {'color': 'black', 'fillColor': 'grey', 'strokeWidth': 1.5}, 'AOI')
+            Map.addLayer(flood_class.clip(city_shp), {'min': 0, 'max': 4, 'palette': ['#FFFFFF','#FFA500','#FFFF00','#FF0000','#0000FF']}, 'Flood class', False)
+            Map.addLayer(flood_mapped.clip(city_shp), {'min': 1, 'max': 2, 'palette': ['blue', 'white']}, 'Flood layer')
+        else:
+            Map.addLayer(city_shp, {'color': 'black', 'fillColor': 'grey', 'strokeWidth': 1.5}, 'AOI')
+            Map.addLayer(flood_class, {'min': 0, 'max': 4, 'palette': ['#FFFFFF','#FFA500','#FFFF00','#FF0000','#0000FF']}, 'Flood class', False)
+            Map.addLayer(flood_mapped, {'min': 1, 'max': 2, 'palette': ['blue', 'white']}, 'Flood layer')
+        
+        # use or operation to check if the analysis type is FMS or FMSE
+        
+        if w_analysis_type.value == 'FMS' or w_analysis_type.value == 'FMSE':
+            
+            
+            print('\nNow Performing Susceptibility Analysis...')
+        
+            flood_sus = susceptibility_analysis(aoi, endDate, flood_mapped, num_samples, split, city, export, accuracy)
+            sus_catagory = quantile_based_categorization(flood_sus, aoi)
+
+
+            if city_shp is not None:
+                
+                Map.addLayer(flood_sus.clip(city_shp), {'min': 0.1, 'max': 0.9, 'palette': ['#1a9641', '#a6d96a', '#ffffbf', '#fdae61', '#d7191c']}, 'Flood Susceptibility')
+                
+                Map.addLayer(sus_catagory.clip(city_shp), {'min': 1, 'max': 5, 'palette': ['#1a9641', '#a6d96a', '#ffffbf', '#fdae61', '#d7191c']}, 'Flood Susceptibility Categorical')
+
+            else:
+                Map.addLayer(flood_sus, {'min': 0.1, 'max': 0.9, 'palette': ['#1a9641', '#a6d96a', '#ffffbf', '#fdae61', '#d7191c']}, 'Flood Susceptibility')
+                Map.addLayer(sus_catagory, {'min': 1, 'max': 5, 'palette': ['#1a9641', '#a6d96a', '#ffffbf', '#fdae61', '#d7191c']}, 'Flood Susceptibility Categorical')
+
+
+            print('Analysis completed...')
+
+            
+            if w_analysis_type.value == 'FMSE':
+                
+                print('\nNow Performing Exposure Analysis...')
+                
+                print('Note: if it takes too long or gives computational error, please first export susceptibility category layer as asset and then use them for exposure assessment')
+                
+
+                #print('\n Susceptibility Quantile Categorization Done...')
+                
+                exposure_df = calculate_exposure_df(sus_catagory, city_shp.geometry(), crs='EPSG:3395', flood_map=False, export=export, city=city, )
+
+                # Print the updated dataframe
+                print('\n Exposure Results',exposure_df)
+                
+                print('\nAnalysis completed...')
+            
+        # exporting layers
+        if export == True:
+            print('Exporting results...')
+            
+            if w_analysis_type.value == 'FMSE' or w_analysis_type.value == 'FMS':
+                print('\n Exporting Results to GDrive FMSE Folder...')
+                if city_shp is not None:
+                    export_layers(aoi=city_shp.geometry(),
+                                  city=city,
+                                    flood_layer=None, 
+                                    flood_class=flood_class, 
+                                    flood_mapped=flood_mapped, 
+                                    susceptibility_layer=flood_sus, 
+                                    susceptibility_category_layer=sus_catagory,
+                                    export_flood_layer=False, export_flood_class=True, export_flood_mapped=True,
+                                    export_susceptibility_layer=True, export_susceptibility_category_layer=True)
+                else:
+                    export_layers(aoi=aoi,
+                                  city=city,
+                                    flood_layer=None, 
+                                    flood_class=flood_class,
+                                    flood_mapped=flood_mapped,
+                                    susceptibility_layer=flood_sus,
+                                    susceptibility_category_layer=sus_catagory,
+                                    export_flood_layer=False, export_flood_class=True, export_flood_mapped=True,
+                                    export_susceptibility_layer=True, export_susceptibility_category_layer=True)
+                    
+           
+            elif w_analysis_type.value == 'FM':
+                print('\n Exporting Results to GDrive FMSE Folder...')
+                if city_shp is not None:
+                    export_layers(aoi=city_shp.geometry(),
+                                  city=city,
+                                    flood_layer=None, 
+                                    flood_class=flood_class,
+                                    flood_mapped=flood_mapped,
+                                    susceptibility_layer=None,
+                                    susceptibility_category_layer=None,
+                                    export_flood_layer=False, export_flood_class=True, export_flood_mapped=True,
+                                    export_susceptibility_layer=False, export_susceptibility_category_layer=False)
+                else:
+                    export_layers(aoi=aoi,
+                                  city=city,
+                                    flood_layer=None, 
+                                    flood_class=flood_class,
+                                    flood_mapped=flood_mapped,
+                                    susceptibility_layer=None,
+                                    susceptibility_category_layer=None,
+                                    export_flood_layer=False, export_flood_class=True, export_flood_mapped=True,
+                                    export_susceptibility_layer=False, export_susceptibility_category_layer=False)
+                    
+                    
+                
+                print('\n Exported Results to GDrive FMSE Folder...')
+
+  
+        
+# Assign the event handler to the button
+w_run_button.on_click(on_run_button_clicked)
+
+
+def runApp():
+    """
+    Main app function
+    """
+    header = widgets.HTML("<h2 style='text-align: center; color: #2F4F4F;'>An Automated, Geo-AI-based Flood Mapping Susceptibility and Exposure (FMSE) Analysis Tool Implemented in Google Earth Engine</h1>")
+    description = widgets.HTML("""
+    <div style='text-align: center; margin-bottom: 20px;'>
+        <p style='color: #696969; margin: 5px 0; display: inline;'>Developed by: <a href='https://www.waleedgeo.com/' target='_blank'>Mirza Waleed</a> | Project Repository: <a href='https://github.com/waleedgeo/FMSE' target='_blank'>FMSE on GitHub</a> | Reach me through: <a href='mailto:waleedgeo@outlook.com' target='_blank'>Email</a></p>
+
+        </div>
+    """)
+    
+    left_sidebar = widgets.VBox([
+        widgets.HTML("<h3 style='color: #8B4513;'>Step 1: Select Case Study and Region</h3>"),
+        w_case_study,
+        w_region,
+        w_region_detail,
+        widgets.HTML("<h3 style='color: #8B4513;'>Step 2: Define Analysis Parameters</h3>"),
+        w_startDate,
+        w_endDate,
+        w_preDays,
+        w_postDays,
+        w_nsamples,
+        w_split_value,
+        widgets.HTML("<h3 style='color: #8B4513;'>Step 3: Select Analysis Type</h3>"),
+        w_analysis_type,
+        widgets.HTML("<h3 style='color: #8B4513;'>Step 4: Export and Run</h3>"),
+        w_accuracy,
+        w_export,
+        w_run_button,
+    ], layout=widgets.Layout(width='28%', padding='10px', border='2px solid #8B4513'))
+    
+    Map.add_basemap("SATELLITE")
+    
+    app_layout = widgets.VBox([
+        header,
+        description,
+        widgets.HBox([
+            left_sidebar,
+            widgets.VBox([Map, w_output], layout=widgets.Layout(width='72%', padding='10px'))
+        ])
+    ])
+    
+    display(app_layout)
+
+#runApp()
+
+
