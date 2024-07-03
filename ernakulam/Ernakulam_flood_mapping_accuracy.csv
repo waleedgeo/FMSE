@@ -1,0 +1,8 @@
+,0
+accuracy,0.91
+precision,0.88
+recall,0.94
+f1_score,0.91
+precision_mean,0.91
+recall_mean,0.92
+f1_mean,0.92

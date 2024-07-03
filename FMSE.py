@@ -103,7 +103,7 @@ def calculate_zscore(s1_pre, s1_post, aoi):
         return ee.ImageCollection.fromImages([zscore_des, zscore_asc]).mean().clip(aoi)
 
 def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd):
-    
+
     """
     Generate flood mask based on Z-score and various thresholds.
 
@@ -133,6 +133,8 @@ def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd):
         slp_thd = 10
     
 
+
+    
     # JRC water mask
     jrc = ee.ImageCollection("JRC/GSW1_4/MonthlyHistory").filterDate('2016-01-01', '2022-01-01')
     jrcvalid = jrc.map(lambda x: x.gt(0)).sum()
@@ -163,7 +165,7 @@ def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd):
     
 
     
-    return flood_class.clip(aoi), flood_layer.clip(aoi)
+    return flood_class.clip(aoi), flood_layer.clip(aoi), ow
 
 
 # masking flood done
@@ -193,49 +195,6 @@ def distance_to_feature(feature_collection, crs, scale, aoi):
     distance_raster = distance_raster.clip(aoi)
 
     return distance_raster
-
-
-def prepare_datasets(aoi, projection='EPSG:4326', scale=30):
-    """
-    Prepare DEM, slope, and aspect datasets.
-
-    Parameters:
-    aoi (ee.Geometry): Area of Interest.
-    projection (str): Projection to reproject the images. Default is 'EPSG:4326'.
-    scale (int): Scale for reprojection. Default is 30.
-
-    Returns:
-    tuple: DEM, slope, aspect, and dtriver images reprojected to the specified projection.
-    """
-    dem_proj = ee.ImageCollection("projects/sat-io/open-datasets/FABDEM")\
-        .filterBounds(aoi)\
-        .mosaic()\
-        .clip(aoi)\
-        .setDefaultProjection('EPSG:3857', None, 30)
-
-    slope_proj = ee.Terrain.slope(dem_proj)
-    aspect_proj = ee.Terrain.aspect(dem_proj)
-
-    dem = dem_proj.reproject(crs=projection, scale=scale)
-    slope = slope_proj.reproject(crs=projection, scale=scale)
-    aspect = aspect_proj.reproject(crs=projection, scale=scale)
-    
-    shoreline = ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/mainlands')\
-        .merge(ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/big_islands'))\
-        .filterBounds(aoi)
-    
-    rivers = ee.FeatureCollection("projects/sat-io/open-datasets/HydroAtlas/RiverAtlas_v10")\
-        .filterBounds(aoi)
-
-    # Combine rivers and shoreline into a single FeatureCollection
-    rivers_and_shoreline = rivers.merge(shoreline)
-
-    # Generate distance rasters for roads, and rivers+shoreline
-    dtriver = distance_to_feature(rivers_and_shoreline, projection, scale, aoi)
-    #rivers_and_shoreline_distance = distance_to_feature(rivers_and_shoreline, 30)
-
-    return dem, slope, aspect, dtriver
-
 
 
 
@@ -432,7 +391,13 @@ def calculate_accuracy_metrics(training, validation, classifier):
 
 def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export=False, accuracy=False):
     # Prepare datasets
-    dem, slope, aspect, dtriver = prepare_datasets(aoi)
+    
+    dem = ee.ImageCollection("projects/sat-io/open-datasets/FABDEM")\
+        .filterBounds(aoi)\
+        .mosaic()\
+        .clip(aoi)\
+        .setDefaultProjection('EPSG:4326', None, 30)
+    
     print('Done with preparing datasets...')
     # Create sample feature collection
     label_fc = create_sample_feature_collection(flood_layer,False, aoi, num_samples)
@@ -459,7 +424,7 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export=Fa
     importance_df = importance_df.sort_values(by='Importance', ascending=False)
 
 
-    print('\n Feature Importance:', importance_df.round(2))
+    print('\n > Feature Importance: \n', importance_df.round(2))
     
     # Classify the image
     model_output = classify_image(image, classifier, bandNames)
@@ -470,12 +435,14 @@ def flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export=Fa
     if accuracy==True:
         results = calculate_accuracy_metrics(training, validation, classifier)
         results = results.round(2)
-        print('Flood Mapping Accuracy Results: ',results)
+        print('\n > Flood Mapping Accuracy Results: \n',results)
         if export==True:
             results.to_csv(f'{city}_flood_mapping_accuracy.csv', index=True)
     if export==True:
         importance_df.to_csv(f'{city}_feature_importance_mapping.csv', index=False)
     print('Done ...')
+    
+
     return model_output
 
 
@@ -531,6 +498,35 @@ def prepare_landsat_images(aoi, endDate):
     return landsat_filtered
 
 
+
+# Function to compute spectral indices
+def compute_indices(image):
+
+    ndwi = image.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI')
+    
+    ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI')
+    
+    ndbi = image.normalizedDifference(['SR_B6', 'SR_B5']).rename('NDBI')
+    
+    # NDFI
+    ndfi = image.normalizedDifference(['SR_B5', 'SR_B6']).rename('NDFI')
+    
+    # WRI
+    wri = image.expression(
+        '((B3 + B4) / (B5 + B6))',
+        {
+            'B3': image.select('SR_B3'),
+            'B4': image.select('SR_B4'),
+            'B5': image.select('SR_B5'),
+            'B6': image.select('SR_B6')
+        }
+    ).rename('WRI')
+    
+    
+    # Add all indices as bands to the original image
+    return image.addBands([ndwi, ndvi, ndbi, ndfi, wri])
+
+
 def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
     
     """
@@ -554,11 +550,29 @@ def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
     
     dem = dem_proj.addBands(slope_proj).addBands(aspect_proj).reproject(crs='EPSG:4326', scale=30)
 
-    ndvi = landsat_filtered.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI')
-    ndwi = landsat_filtered.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI')
-    ndbi = landsat_filtered.normalizedDifference(['SR_B6', 'SR_B5']).rename('NDBI')
-    #ndsi = landsat_filtered.normalizedDifference(['SR_B2', 'SR_B5']).rename('NDSI')
+    
+    # preparing distance rasters
+    shoreline = ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/mainlands')\
+        .merge(ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/big_islands'))\
+        .filterBounds(aoi)
+    
+    rivers = ee.FeatureCollection("projects/sat-io/open-datasets/HydroAtlas/RiverAtlas_v10")\
+        .filterBounds(aoi)
 
+    # Combine rivers and shoreline into a single FeatureCollection
+    rivers_and_shoreline = rivers.merge(shoreline)
+
+    # Generate distance rasters for roads, and rivers+shoreline
+    dtriver = distance_to_feature(rivers_and_shoreline, 'EPSG:4326', 30, aoi)
+    #rivers_and_shoreline_distance = distance_to_feature(rivers_and_shoreline, 30)
+    
+    landsat_filtered = compute_indices(landsat_filtered)
+
+    #rmax = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')\
+    #      .filterBounds(aoi)\
+    #      .filterDate('2018-01-01', '2023-01-01')\
+    #      .max().clip(aoi).setDefaultProjection('EPSG:4326', None, 30).rename('Rmax')
+    
     #rainfall = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')\
     #            .filterDate('2018-01-01', '2023-01-01')\
     #            .filterBounds(aoi)\
@@ -567,12 +581,12 @@ def prepare_datasets_for_susceptibility(aoi, landsat_filtered):
     #            .sum().rename('rainfall')\
     #            .reproject(crs='EPSG:4326', scale=30)
     print('Done with preparing datasets for susceptibility analysis...')
-    
-    image_sus = landsat_filtered.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'])\
-                                .addBands([ndvi, ndwi, ndbi, dem])\
+    # current landsat bands
+    landsat_bands = ['SR_B1','SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'NDWI', 'NDVI', 'NDBI', 'NDFI', 'WRI']
+    image_sus = landsat_filtered.select(landsat_bands)\
+                                .addBands([dem, dtriver.rename('DtRiver')])\
                                 .clip(aoi)\
                                 .setDefaultProjection('EPSG:4326')
-    
     return image_sus
 
 
@@ -608,12 +622,14 @@ def train_susceptibility_model(image_sus, label, split, city, export=False, accu
     importances = classifier_sus.explain().get('importance')
 
     # Convert the feature importance dictionary to a Pandas DataFrame
+
     importance_dict = importances.getInfo()
     importance_df = pd.DataFrame(list(importance_dict.items()), columns=['Feature', 'Importance'])
 
+    
     # Sort the DataFrame by importance in descending order
     importance_df = importance_df.sort_values(by='Importance', ascending=False)
-
+    
     print('Feature Importance:', importance_df.round(2))
     
     classifier_prob = classifier_sus.setOutputMode('PROBABILITY')
@@ -623,7 +639,7 @@ def train_susceptibility_model(image_sus, label, split, city, export=False, accu
     if accuracy==True:
         results = calculate_accuracy_metrics(training_sus, validation_sus, classifier_sus)
         results = results.round(2)
-        print('Flood Susceptibility Mapping Accuracy Results: ', results)
+        print('\n > Flood Susceptibility Mapping Accuracy Results: ', results)
         if export==True:
             results.to_csv(f'{city}_flood_susceptibility_accuracy.csv', index=True)
     
@@ -632,7 +648,7 @@ def train_susceptibility_model(image_sus, label, split, city, export=False, accu
     return flood_prob
 
 # Example usage for susceptibility analysis
-def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split, city, export=False, accuracy=False):
+def susceptibility_analysis(aoi, endDate, flood_classified, num_samples, split, city, export=False, accuracy=False):
     # Prepare Landsat images
     landsat_filtered = prepare_landsat_images(aoi, endDate)
 
@@ -640,7 +656,7 @@ def susceptibility_analysis(aoi, endDate, flood_binary, num_samples, split, city
     image_sus = prepare_datasets_for_susceptibility(aoi, landsat_filtered)
 
     # Create sample feature collection
-    label_new = create_sample_feature_collection(flood_binary.rename('label'), True, aoi, num_samples)
+    label_new = create_sample_feature_collection(flood_classified.rename('label'), True, aoi, num_samples)
     # Train susceptibility model
     flood_prob = train_susceptibility_model(image_sus, label_new, split, city, export, accuracy)
 
