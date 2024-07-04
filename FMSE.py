@@ -93,14 +93,31 @@ def calculate_zscore(s1_pre, s1_post, aoi):
     cond_asc = s1_pre.filter(asc).size().gt(0).And(s1_post.filter(asc).size().gt(0))
     cond_des = s1_pre.filter(des).size().gt(0).And(s1_post.filter(des).size().gt(0))
 
-    if cond_asc.getInfo():
+    
+    # Check for availability of ascending and descending images.
+    cond_asc = s1_pre.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING')).size().gt(0)
+    cond_des = s1_pre.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING')).size().gt(0)
+
+    # Calculate z-scores based on available data.
+    if cond_asc.getInfo() and cond_des.getInfo():
+        zscore_asc = calc_zscore(s1_pre, s1_post, 'ASCENDING')
+        zscore_des = calc_zscore(s1_pre, s1_post, 'DESCENDING')
+        return ee.ImageCollection.fromImages([zscore_asc, zscore_des]).mean().clip(aoi)
+    elif cond_asc.getInfo():
         return calc_zscore(s1_pre, s1_post, 'ASCENDING')
     elif cond_des.getInfo():
         return calc_zscore(s1_pre, s1_post, 'DESCENDING')
     else:
-        zscore_des = calc_zscore(s1_pre, s1_post, 'DESCENDING')
-        zscore_asc = calc_zscore(s1_pre, s1_post, 'ASCENDING')
-        return ee.ImageCollection.fromImages([zscore_des, zscore_asc]).mean().clip(aoi)
+        raise ValueError("No available images for both ascending and descending passes.")
+    
+    #if cond_asc.getInfo():
+    #    return calc_zscore(s1_pre, s1_post, 'ASCENDING')
+    #elif cond_des.getInfo():
+    #    return calc_zscore(s1_pre, s1_post, 'DESCENDING')
+    #else:
+    #    zscore_des = calc_zscore(s1_pre, s1_post, 'DESCENDING')
+    #    zscore_asc = calc_zscore(s1_pre, s1_post, 'ASCENDING')
+    #    return ee.ImageCollection.fromImages([zscore_des, zscore_asc]).mean().clip(aoi)
 
 def map_floods(z, aoi, zvv_thd, zvh_thd, pow_thd, elev_thd, slp_thd):
 
@@ -1303,12 +1320,13 @@ w_region.observe(update_region_detail, 'value')
 # Function to set parameters based on case study selection
 def set_case_study_params(change):
     if w_case_study.value == 'shikarpur':
-        w_startDate.value = datetime.date(2022, 3, 1)
-        w_endDate.value = datetime.date(2022, 8, 1)
+        w_startDate.value = datetime.date(2022, 2, 1)
+        w_endDate.value = datetime.date(2022, 9, 1)
         w_preDays.value = 60
-        w_postDays.value = 30
+        w_postDays.value = 7
         w_region.value = 'Select ADM2 Name'
         w_adm2.value = 'Shikarpur'
+        w_nsamples.value = 500
         
         
         
@@ -1324,12 +1342,13 @@ def set_case_study_params(change):
         
         # Set other parameters specific to Nhamatanda
     elif w_case_study.value == 'ernukulam':
-        w_startDate.value = datetime.date(2018, 3, 1)
+        w_startDate.value = datetime.date(2018, 1, 1)
         w_endDate.value = datetime.date(2018, 8, 7)
-        w_preDays.value = 60
+        w_preDays.value = 30
         w_postDays.value = 20
         w_region.value = 'Select ADM2 Name'
         w_adm2.value = 'Ernukulam'
+        w_nsamples.value = 500
         
         # Set other parameters specific to Ernukulam
     elif w_case_study.value == 'sylhet':
@@ -1407,7 +1426,7 @@ def get_flood_layer():
     zscore = calculate_zscore(s1_pre, s1_post, aoi)
 
     # Generate flood masks
-    flood_class, flood_layer = map_floods(zscore, aoi, zvv_value, zvh_value, water_value, elev_value, slope_value)
+    flood_class, flood_layer, ow = map_floods(zscore, aoi, zvv_value, zvh_value, water_value, elev_value, slope_value)
 
     print('Done with flood masking...')    
 
@@ -1415,7 +1434,7 @@ def get_flood_layer():
     flood_mapped = flood_mapping(aoi, s1_post, flood_layer, num_samples, split, city, export, accuracy)
     print('Done with flood mapping...')
 
-    return flood_class, flood_mapped
+    return flood_class, ow, flood_mapped
 
 
 
@@ -1459,16 +1478,22 @@ def on_run_button_clicked(b):
         print('Analysis started...')
         
         print('Starting flood mapping ...')
-        flood_class, flood_mapped = get_flood_layer()
+        flood_class, ow, flood_mapped = get_flood_layer()
         Map.centerObject(aoi, 10)
         if city_shp is not None:
             Map.addLayer(city_shp, {'color': 'black', 'fillColor': 'grey', 'strokeWidth': 1.5}, 'AOI')
             Map.addLayer(flood_class.clip(city_shp), {'min': 0, 'max': 4, 'palette': ['#FFFFFF','#FFA500','#FFFF00','#FF0000','#0000FF']}, 'Flood class', False)
-            Map.addLayer(flood_mapped.clip(city_shp), {'min': 1, 'max': 2, 'palette': ['blue', 'white']}, 'Flood layer')
+            flood_mapped = flood_mapped.where(ow, 3).clip(city_shp)
+            Map.addLayer(flood_mapped, {'min': 1, 'max': 3, 'palette': ['#00FFFF', '#f3f7f7', '#0000FF']}, 'Flood layer (with OW)')
+
+            #Map.addLayer(flood_mapped.clip(city_shp), {'min': 1, 'max': 2, 'palette': ['blue', 'white']}, 'Flood layer')
         else:
             Map.addLayer(city_shp, {'color': 'black', 'fillColor': 'grey', 'strokeWidth': 1.5}, 'AOI')
             Map.addLayer(flood_class, {'min': 0, 'max': 4, 'palette': ['#FFFFFF','#FFA500','#FFFF00','#FF0000','#0000FF']}, 'Flood class', False)
-            Map.addLayer(flood_mapped, {'min': 1, 'max': 2, 'palette': ['blue', 'white']}, 'Flood layer')
+            flood_mapped = flood_mapped.where(ow, 3)
+            Map.addLayer(flood_mapped, {'min': 1, 'max': 3, 'palette': ['#00FFFF', '#f3f7f7', '#0000FF']}, 'Flood layer (with OW)')
+
+            #Map.addLayer(flood_mapped, {'min': 1, 'max': 2, 'palette': ['blue', 'white']}, 'Flood layer')
         
         # use or operation to check if the analysis type is FMS or FMSE
         
