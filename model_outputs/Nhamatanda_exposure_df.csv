@@ -1,6 +1,0 @@
-Susceptibility Level,Category,Exposed Population,Exposed Nighttime Light,lulc_water,lulc_trees,lulc_flooded_vegetation,lulc_crops,lulc_built_area,lulc_bare_ground,lulc_snow_ice,lulc_clouds,lulc_rangeland,population_p,ntl_p,lulc_water_p,lulc_trees_p,lulc_flooded_vegetation_p,lulc_crops_p,lulc_built_area_p,lulc_bare_ground_p,lulc_snow_ice_p,lulc_clouds_p,lulc_rangeland_p
-1,Very Low,46398,0.0,1.88,26352.9,0.0,131.4,224.45,0.94,0,0,31053.74,14.96,0.0,0.07,22.12,0.0,1.71,6.86,0.64,0.0,0.0,11.77
-2,Low,79540,24.58,16.48,43251.89,5.64,945.07,644.2,0.0,0,0,54096.29,25.64,12.12,0.59,36.3,0.12,12.33,19.68,0.0,0.0,0.0,20.51
-3,Moderate,68745,52.83,67.51,25176.97,60.13,1760.7,762.49,1.88,0,0,53834.36,22.16,26.04,2.43,21.13,1.31,22.97,23.3,1.28,0.0,0.0,20.41
-4,High,68892,109.1,569.25,17186.78,287.02,3472.82,1387.75,26.73,0,0,54497.94,22.21,53.78,20.48,14.43,6.26,45.31,42.4,18.22,0.0,0.0,20.66
-5,Very High,46584,16.35,2123.91,7166.43,4235.19,1354.49,254.29,117.18,0,0,70266.9,15.02,8.06,76.43,6.02,92.31,17.67,7.77,79.86,0.0,0.0,26.64
